@@ -1,0 +1,24 @@
+{
+  "name": "webcrypto-ratchet",
+  "version": "0.1.0",
+  "description": "X3DH key agreement + Double Ratchet session encryption, built entirely on the standard WebCrypto API (no native bindings, no external crypto library).",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "double-ratchet",
+    "x3dh",
+    "e2ee",
+    "webcrypto",
+    "signal-protocol"
+  ]
+}
