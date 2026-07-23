@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   bytes,
   text,
+  base64ToUint8,
+  uint8ToBase64,
   exportRawPublic,
   generateDhKeyPair,
   generateSigningKeyPair,
@@ -96,6 +98,34 @@ test("handshake + first message roundtrip", async () => {
   assert.equal(text(plaintext), "hello bob");
 });
 
+test("the wire frame carries no plaintext routing metadata", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession } = await handshake(alice, bob);
+
+  const frame = await aliceSession.encrypt(bytes("hello"));
+  assert.equal(frame.dh, undefined);
+  assert.equal(frame.n, undefined);
+  assert.equal(frame.pn, undefined);
+  assert.equal(typeof frame.headerIv, "string");
+  assert.equal(typeof frame.header, "string");
+  assert.equal(typeof frame.iv, "string");
+  assert.equal(typeof frame.body, "string");
+});
+
+test("a tampered header ciphertext fails to decrypt", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  const frame = await aliceSession.encrypt(bytes("hello"));
+  const tamperedHeader = base64ToUint8(frame.header);
+  tamperedHeader[0] ^= 0xff;
+  const tampered = { ...frame, header: uint8ToBase64(tamperedHeader) };
+
+  await assert.rejects(() => bobSession.decrypt(tampered));
+});
+
 test("out-of-order delivery within one chain uses the skipped-key cache", async () => {
   const alice = await createParty();
   const bob = await createParty();
@@ -128,11 +158,36 @@ test("a late message from a chain already superseded by a DH ratchet still decry
 
   // Alice's next message now carries a brand new ratchet key.
   const a2 = await aliceSession.encrypt(bytes("a2"));
-  assert.notEqual(a2.dh, a0.dh, "a2 should be on a new ratchet chain");
   assert.equal(text(await bobSession.decrypt(a2)), "a2"); // forces Bob to ratchet too
 
   // The still-delayed a1, from the now-superseded chain, must still decrypt --
   // and must NOT cause Bob to ratchet backward.
+  assert.equal(text(await bobSession.decrypt(a1)), "a1");
+});
+
+test("a message skipped two ratchet generations ago is still recoverable", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  const a0 = await aliceSession.encrypt(bytes("a0"));
+  const a1 = await aliceSession.encrypt(bytes("a1")); // delayed until the very end
+  assert.equal(text(await bobSession.decrypt(a0)), "a0");
+
+  const b0 = await bobSession.encrypt(bytes("b0"));
+  assert.equal(text(await aliceSession.decrypt(b0)), "b0"); // Alice's 1st ratchet
+
+  const a2 = await aliceSession.encrypt(bytes("a2"));
+  assert.equal(text(await bobSession.decrypt(a2)), "a2"); // Bob's 1st ratchet of Alice's key -- a1 cached here
+
+  const b1 = await bobSession.encrypt(bytes("b1"));
+  assert.equal(text(await aliceSession.decrypt(b1)), "b1"); // Alice's 2nd ratchet
+
+  const a3 = await aliceSession.encrypt(bytes("a3"));
+  assert.equal(text(await bobSession.decrypt(a3)), "a3"); // Bob's 2nd ratchet of Alice's key
+
+  // a1 is now two ratchet generations behind Bob's current chain -- only the skip-cache's
+  // header-key trial decryption can still recover it.
   assert.equal(text(await bobSession.decrypt(a1)), "a1");
 });
 

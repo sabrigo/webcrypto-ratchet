@@ -19,9 +19,13 @@ anything sensitive.
   step whenever the peer's ratchet public key changes — giving you forward secrecy message by
   message, not just session by session.
 - **Skipped-message-key handling**: messages that arrive out of order, or late from a chain
-  that's since been superseded by a ratchet step, still decrypt correctly via a bounded cache
-  (`maxSkip`, default 1000) instead of failing outright. Only a message whose key is genuinely
-  gone (already used, or older than the cache retains) is rejected.
+  that's since been superseded by one or more ratchet steps, still decrypt correctly via a
+  bounded cache (`maxSkip`, default 1000) instead of failing outright. Only a message whose key
+  is genuinely gone (already used, or older than the cache retains) is rejected.
+- **Encrypted headers**: the ratchet public key and message counters travel encrypted, under a
+  key that itself rotates on every DH ratchet step (Signal's "Double Ratchet with header
+  encryption" extension) — an observer of the wire frames sees only opaque ciphertext, not
+  message cadence or ratchet timing, on top of message content already being confidential.
 
 ## Install
 
@@ -96,7 +100,8 @@ await recipientSession.initAsRecipient(secret2, {
 
 // --- sending and receiving ---
 const frame = await session.encrypt(bytes("hello"));
-// frame is JSON-safe: { dh, pn, n, iv, body } -- send it however you like
+// frame is JSON-safe: { headerIv, header, iv, body } -- send it however you like.
+// The ratchet key and counters are inside the encrypted `header`, not visible on the wire.
 
 const plaintext = await recipientSession.decrypt(frame);
 console.log(text(plaintext)); // "hello"
@@ -107,10 +112,10 @@ console.log(text(plaintext)); // "hello"
 - **Not an audited implementation.** This is a from-scratch reimplementation of the X3DH/Double
   Ratchet *design*, not the `libsignal` library, and has not had an independent cryptographic
   audit. If you need that guarantee, use `libsignal` (it has WASM/JS bindings) instead.
-- **No message header encryption.** The ratchet public key, counters (`n`/`pn`), and IV travel
-  as plaintext metadata alongside the ciphertext — only the message body is confidential.
-  Signal's production protocol optionally encrypts this metadata ("sealed sender" / header
-  encryption); this library doesn't.
+- **Header encryption protects metadata, not content.** Message content was already fully
+  confidential via AES-256-GCM before this was added — encrypting `{dh, pn, n}` additionally
+  hides message cadence and ratchet timing from anyone who sees the wire frames. It doesn't
+  change what was already protected, only what else now is.
 - **`maxSkip` bounds memory, not just correctness.** A message claiming a huge counter jump is
   rejected rather than allowed to force unbounded key derivation/caching — tune it down if your
   application doesn't need to tolerate long gaps.
@@ -124,9 +129,10 @@ console.log(text(plaintext)); // "hello"
 npm test
 ```
 
-Runs the `node:test` suite in `test/`, covering: a full handshake and roundtrip, out-of-order
-delivery within one chain, a message that arrives late from a chain already superseded by a DH
-ratchet, replay rejection, and the `maxSkip` cap.
+Runs the `node:test` suite in `test/`, covering: a full handshake and roundtrip, confirming the
+wire frame carries no plaintext routing metadata, header-ciphertext tamper detection, out-of-order
+delivery within one chain, a message that arrives late from a chain superseded by a DH ratchet
+(including one skipped two ratchet generations ago), replay rejection, and the `maxSkip` cap.
 
 ## License
 

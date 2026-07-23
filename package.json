@@ -1,6 +1,6 @@
 {
   "name": "webcrypto-ratchet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "X3DH key agreement + Double Ratchet session encryption, built entirely on the standard WebCrypto API (no native bindings, no external crypto library).",
   "type": "module",
   "license": "MIT",
