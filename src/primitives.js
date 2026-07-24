@@ -1,6 +1,6 @@
-// Byte/base64 helpers, ECDH/ECDSA key operations, DER<->raw P-256 signature conversion,
-// and HKDF/HMAC/SHA-256 wrappers -- all built on the standard WebCrypto API (crypto.subtle).
-// No networking, no protocol logic here; see x3dh.js and ratchet.js for that.
+// Byte/base64 helpers, X25519/Ed25519 key operations, and HKDF/HMAC/SHA-256 wrappers -- all
+// built on the standard WebCrypto API (crypto.subtle). No networking, no protocol logic here;
+// see x3dh.js and ratchet.js for that.
 
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
@@ -46,54 +46,6 @@ export function equalBytes(a, b) {
   return diff === 0;
 }
 
-function trimLeadingZeroes(value) {
-  let offset = 0;
-  while (offset < value.length - 1 && value[offset] === 0) offset++;
-  return value.slice(offset);
-}
-
-function leftPadP256Integer(value) {
-  const trimmed = trimLeadingZeroes(value);
-  if (trimmed.length > 32) throw new Error("Invalid P-256 signature integer");
-  const out = new Uint8Array(32);
-  out.set(trimmed, 32 - trimmed.length);
-  return out;
-}
-
-function derIntegerFromP256(value) {
-  let integer = trimLeadingZeroes(value);
-  if (integer[0] & 0x80) integer = concatBytes(new Uint8Array([0]), integer);
-  return concatBytes(new Uint8Array([0x02, integer.length]), integer);
-}
-
-// WebCrypto's ECDSA sign/verify uses the raw (r||s) IEEE P1363 format, but some peers may hand
-// you DER-encoded signatures (or vice versa) -- these two converters let verifyBytes() accept
-// either without the caller needing to know which one it got.
-export function rawP256SignatureToDer(signature) {
-  if (!(signature instanceof Uint8Array) || signature.length !== 64) {
-    throw new Error("Invalid raw P-256 signature");
-  }
-  const r = derIntegerFromP256(signature.slice(0, 32));
-  const s = derIntegerFromP256(signature.slice(32, 64));
-  return concatBytes(new Uint8Array([0x30, r.length + s.length]), r, s);
-}
-
-export function derP256SignatureToRaw(signature) {
-  if (!(signature instanceof Uint8Array) || signature.length < 8 || signature[0] !== 0x30 || signature[1] !== signature.length - 2) {
-    throw new Error("Invalid DER P-256 signature");
-  }
-  let offset = 2;
-  if (signature[offset++] !== 0x02) throw new Error("Invalid DER P-256 signature");
-  const rLength = signature[offset++];
-  const r = signature.slice(offset, offset + rLength);
-  offset += rLength;
-  if (signature[offset++] !== 0x02) throw new Error("Invalid DER P-256 signature");
-  const sLength = signature[offset++];
-  const s = signature.slice(offset, offset + sLength);
-  if (offset + sLength !== signature.length) throw new Error("Invalid DER P-256 signature");
-  return concatBytes(leftPadP256Integer(r), leftPadP256Integer(s));
-}
-
 export async function sha256(data) {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
 }
@@ -115,11 +67,11 @@ export async function hkdf(secretBytes, saltBytes, infoBytes, byteLength) {
 }
 
 export async function generateDhKeyPair() {
-  return crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  return crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
 }
 
 export async function generateSigningKeyPair() {
-  return crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  return crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
 }
 
 export async function exportRawPublic(key) {
@@ -131,48 +83,35 @@ export async function exportPrivateJwk(key) {
 }
 
 export async function importDhPublic(raw) {
-  return crypto.subtle.importKey("raw", raw, { name: "ECDH", namedCurve: "P-256" }, false, []);
+  return crypto.subtle.importKey("raw", raw, { name: "X25519" }, false, []);
 }
 
 export async function importDhPrivate(jwk) {
-  return crypto.subtle.importKey("jwk", jwk, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  return crypto.subtle.importKey("jwk", jwk, { name: "X25519" }, true, ["deriveBits"]);
 }
 
 export async function importSigningPublic(raw) {
-  return crypto.subtle.importKey("raw", raw, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  return crypto.subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
 }
 
 export async function importSigningPrivate(jwk) {
-  return crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["sign"]);
+  return crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
 }
 
 export async function dh(privateKey, publicKeyRaw) {
   const publicKey = await importDhPublic(publicKeyRaw);
-  return new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: publicKey }, privateKey, 256));
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: publicKey }, privateKey, 256));
 }
 
 export async function signBytes(privateKey, message) {
-  return new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, privateKey, message));
+  return new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, message));
 }
 
 export async function verifyBytes(publicKeyRaw, message, signature) {
   const publicKey = await importSigningPublic(publicKeyRaw);
-  const candidates = [signature];
   try {
-    const raw = derP256SignatureToRaw(signature);
-    if (!candidates.some((candidate) => equalBytes(candidate, raw))) candidates.push(raw);
-  } catch {}
-  try {
-    const der = rawP256SignatureToDer(signature);
-    if (!candidates.some((candidate) => equalBytes(candidate, der))) candidates.push(der);
-  } catch {}
-
-  for (const candidate of candidates) {
-    try {
-      if (await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, publicKey, candidate, message)) {
-        return true;
-      }
-    } catch {}
+    return await crypto.subtle.verify({ name: "Ed25519" }, publicKey, signature, message);
+  } catch {
+    return false;
   }
-  return false;
 }

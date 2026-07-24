@@ -10,7 +10,7 @@ import {
   generateSigningKeyPair,
   signBytes,
 } from "../src/primitives.js";
-import { deriveSecretAsInitiator, deriveSecretAsRecipient } from "../src/x3dh.js";
+import { deriveSecretAsInitiator, deriveSecretAsRecipient, generatePqPreKeyPair } from "../src/x3dh.js";
 import { DoubleRatchetSession } from "../src/ratchet.js";
 
 const CONTEXT = "test-session-1";
@@ -21,13 +21,17 @@ async function createParty() {
   const signedPreKey = await generateDhKeyPair();
   const signedPreKeyPublicRaw = await exportRawPublic(signedPreKey.publicKey);
   const signature = await signBytes(signing.privateKey, signedPreKeyPublicRaw);
+  const pqPreKey = generatePqPreKeyPair();
+  const pqPreKeySignature = await signBytes(signing.privateKey, pqPreKey.publicKey);
   return {
     identity,
     signedPreKey,
+    pqPreKey,
     identityPublicRaw: await exportRawPublic(identity.publicKey),
     signingPublicRaw: await exportRawPublic(signing.publicKey),
     signedPreKeyPublicRaw,
     signedPreKeySignature: signature,
+    pqPreKeySignature,
   };
 }
 
@@ -35,13 +39,15 @@ async function handshake(alice, bob) {
   const ephemeral = await generateDhKeyPair();
   const ephemeralPublicRaw = await exportRawPublic(ephemeral.publicKey);
 
-  const aliceSecret = await deriveSecretAsInitiator({
+  const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
     identityPrivateKey: alice.identity.privateKey,
     ephemeralPrivateKey: ephemeral.privateKey,
     peerIdentityPublicKeyRaw: bob.identityPublicRaw,
     peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
     peerSignedPreKeySignature: bob.signedPreKeySignature,
     peerSigningPublicKeyRaw: bob.signingPublicRaw,
+    peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+    peerPqPreKeySignature: bob.pqPreKeySignature,
     contextInfo: CONTEXT,
   });
 
@@ -50,19 +56,24 @@ async function handshake(alice, bob) {
     signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
     peerIdentityPublicKeyRaw: alice.identityPublicRaw,
     peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
+    pqPreKeySecretKey: bob.pqPreKey.secretKey,
+    pqCipherText,
     contextInfo: CONTEXT,
   });
 
-  assert.deepStrictEqual(aliceSecret, bobSecret, "both sides must derive the same X3DH secret");
+  assert.deepStrictEqual(aliceSecret, bobSecret, "both sides must derive the same PQXDH secret");
 
   const aliceSession = new DoubleRatchetSession();
-  await aliceSession.initAsInitiator(aliceSecret, bob.signedPreKeyPublicRaw);
+  await aliceSession.initAsInitiator(aliceSecret, bob.signedPreKeyPublicRaw, bob.pqPreKey.publicKey);
 
   const bobSession = new DoubleRatchetSession();
   await bobSession.initAsRecipient(bobSecret, {
     initialRatchetKeyPair: bob.signedPreKey,
     initialRatchetPublic: bob.signedPreKeyPublicRaw,
+    initialPqRatchetKeyPair: bob.pqPreKey,
     remoteRatchetPublic: aliceSession.localRatchetPublic,
+    remotePqRatchetPublic: aliceSession.localPqRatchet.publicKey,
+    remotePqCipherText: aliceSession.pqCtToSend,
   });
 
   return { aliceSession, bobSession };
@@ -82,9 +93,33 @@ test("X3DH signature check rejects a tampered signed prekey", async () => {
         peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
         peerSignedPreKeySignature: alice.signedPreKeySignature, // wrong signature
         peerSigningPublicKeyRaw: bob.signingPublicRaw,
+        peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+        peerPqPreKeySignature: bob.pqPreKeySignature,
         contextInfo: CONTEXT,
       }),
     /Invalid signed prekey signature/
+  );
+});
+
+test("PQXDH signature check rejects a tampered PQ prekey", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const ephemeral = await generateDhKeyPair();
+
+  await assert.rejects(
+    () =>
+      deriveSecretAsInitiator({
+        identityPrivateKey: alice.identity.privateKey,
+        ephemeralPrivateKey: ephemeral.privateKey,
+        peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+        peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+        peerSignedPreKeySignature: bob.signedPreKeySignature,
+        peerSigningPublicKeyRaw: bob.signingPublicRaw,
+        peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+        peerPqPreKeySignature: alice.pqPreKeySignature, // wrong signature
+        contextInfo: CONTEXT,
+      }),
+    /Invalid PQ prekey signature/
   );
 });
 

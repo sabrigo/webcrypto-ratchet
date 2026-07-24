@@ -1,9 +1,23 @@
-// Double Ratchet session with encrypted headers: per-message AES-256-GCM keys derived from a
-// chain that rotates on every send/receive, a DH ratchet step whenever the peer's ratchet
-// public key changes, and the routing metadata itself (ratchet key, counters) encrypted under a
-// rotating header key -- so an observer of the wire frames sees only opaque ciphertext, never
-// message cadence or ratchet timing, on top of the message content already being confidential.
-// This follows Signal's own "Double Ratchet with header encryption" extension.
+// Triple Ratchet session with encrypted headers: per-message AES-256-GCM keys derived from a
+// chain that rotates on every send/receive, a ratchet step whenever the peer's ratchet keys
+// change, and the routing metadata itself (ratchet keys, counters) encrypted under a rotating
+// header key -- so an observer of the wire frames sees only opaque ciphertext, never message
+// cadence or ratchet timing, on top of the message content already being confidential. This
+// follows Signal's own "Double Ratchet with header encryption" extension.
+//
+// The ratchet step itself runs TWO independent public-key ratchets in parallel and mixes both
+// outputs into the root KDF, matching Signal's production "Triple Ratchet" (Double Ratchet +
+// SPQR): a classical X25519 DH ratchet, and an ML-KEM-768 KEM ratchet that advances in lockstep
+// with it. Where DH is symmetric (either side can compute the same value from their own private
+// key and the peer's public key), a KEM is not -- only the keypair owner can decapsulate, so
+// each ratchet step publishes a fresh ML-KEM public key (for the peer's NEXT step to encapsulate
+// against) alongside a ciphertext (produced by encapsulating against the peer's most recently
+// published key, for THEM to decapsulate). An adversary has to break both X25519 and ML-KEM to
+// recover a step's chain key -- breaking either alone, now or with a future quantum computer,
+// isn't enough. (Signal's production SPQR additionally chunks its ~1KB KEM payload across
+// several messages via erasure coding purely to fit SMS-era bandwidth budgets -- that's a
+// transport optimization, not a security requirement, so it's not reproduced here; the KEM
+// public key and ciphertext just travel whole, inside the already-encrypted header.)
 //
 // Includes a bounded skipped-message-key cache (the MAX_SKIP-capped MKSKIPPED store) so a
 // dropped or reordered message doesn't kill the session -- only decrypting a message whose key
@@ -22,8 +36,9 @@ import {
   generateDhKeyPair,
   exportRawPublic,
 } from "./primitives.js";
+import { generatePqKeyPair, pqEncapsulate, pqDecapsulate } from "./pq.js";
 
-const ROOT_INFO = bytes("webcrypto-ratchet-double-ratchet-root-v2");
+const ROOT_INFO = bytes("webcrypto-ratchet-triple-ratchet-root-v3");
 const HEADER_KEY_BOOTSTRAP_INFO = bytes("webcrypto-ratchet-header-key-init-v2");
 const MESSAGE_LABEL = bytes("message:");
 const CHAIN_LABEL = bytes("chain:");
@@ -31,8 +46,8 @@ const EMPTY_SALT = new Uint8Array(0);
 const DEFAULT_MAX_SKIP = 1000;
 const DEFAULT_AAD_PREFIX = "ratchet-msg";
 
-async function kdfRootHE(rootKey, dhOutput) {
-  const material = await hkdf(dhOutput, rootKey, ROOT_INFO, 96);
+async function kdfRootHE(rootKey, dhOutput, pqSharedSecret) {
+  const material = await hkdf(concatBytes(dhOutput, pqSharedSecret), rootKey, ROOT_INFO, 96);
   return { root: material.slice(0, 32), chain: material.slice(32, 64), nextHeaderKey: material.slice(64, 96) };
 }
 
@@ -89,6 +104,8 @@ function validateFrame(frame) {
 function validateDecryptedHeader(header) {
   if (!header || typeof header !== "object") throw new Error("Invalid decrypted header");
   if (typeof header.dh !== "string" || !header.dh) throw new Error("Invalid decrypted header: dh");
+  if (typeof header.pqEk !== "string" || !header.pqEk) throw new Error("Invalid decrypted header: pqEk");
+  if (typeof header.pqCt !== "string" || !header.pqCt) throw new Error("Invalid decrypted header: pqCt");
   if (!Number.isInteger(header.n) || header.n < 0) throw new Error("Invalid decrypted header: n");
   if (!Number.isInteger(header.pn) || header.pn < 0) throw new Error("Invalid decrypted header: pn");
 }
@@ -109,6 +126,10 @@ export class DoubleRatchetSession {
     this.localRatchet = null;
     this.localRatchetPublic = null;
     this.remoteRatchetPublic = null;
+    // ML-KEM-768 ratchet, advancing in lockstep with the X25519 ratchet above (see file header).
+    this.localPqRatchet = null;
+    this.remotePqRatchetPublic = null;
+    this.pqCtToSend = null;
     this.sendChainKey = null;
     this.receiveChainKey = null;
     this.sendCounter = 0;
@@ -129,17 +150,26 @@ export class DoubleRatchetSession {
   }
 
   /**
-   * Call after completing X3DH as the handshake initiator.
-   * @param {Uint8Array} sharedSecret - the X3DH output
-   * @param {Uint8Array} remoteRatchetPublic - peer's initial ratchet public key (their signed prekey)
+   * Call after completing PQXDH as the handshake initiator.
+   * @param {Uint8Array} sharedSecret - the PQXDH output
+   * @param {Uint8Array} remoteRatchetPublic - peer's initial X25519 ratchet public key (their signed prekey)
+   * @param {Uint8Array} remotePqRatchetPublic - peer's initial ML-KEM-768 ratchet public key (their PQ prekey)
    */
-  async initAsInitiator(sharedSecret, remoteRatchetPublic) {
+  async initAsInitiator(sharedSecret, remoteRatchetPublic, remotePqRatchetPublic) {
     const { sharedHka, sharedNhkb } = await bootstrapHeaderKeys(sharedSecret);
     this.rootKey = sharedSecret;
     this.remoteRatchetPublic = remoteRatchetPublic;
+    this.remotePqRatchetPublic = remotePqRatchetPublic;
     this.localRatchet = await generateDhKeyPair();
     this.localRatchetPublic = await exportRawPublic(this.localRatchet.publicKey);
-    const next = await kdfRootHE(this.rootKey, await dh(this.localRatchet.privateKey, this.remoteRatchetPublic));
+    this.localPqRatchet = generatePqKeyPair();
+    const { cipherText: pqCt, sharedSecret: pqSharedSecret } = pqEncapsulate(this.remotePqRatchetPublic);
+    this.pqCtToSend = pqCt;
+    const next = await kdfRootHE(
+      this.rootKey,
+      await dh(this.localRatchet.privateKey, this.remoteRatchetPublic),
+      pqSharedSecret
+    );
     this.rootKey = next.root;
     this.sendChainKey = next.chain;
     this.nextHeaderKeySend = next.nextHeaderKey;
@@ -152,53 +182,90 @@ export class DoubleRatchetSession {
   }
 
   /**
-   * Call after completing X3DH as the handshake recipient.
-   * @param {Uint8Array} sharedSecret - the X3DH output
+   * Call after completing PQXDH as the handshake recipient.
+   * @param {Uint8Array} sharedSecret - the PQXDH output
    * @param {object} params
    * @param {CryptoKeyPair} params.initialRatchetKeyPair - our already-published keypair (e.g. the
-   *   signed prekey) that the initiator used as our stand-in ratchet key for their first message
+   *   signed prekey) that the initiator used as our stand-in X25519 ratchet key for their first message
    * @param {Uint8Array} params.initialRatchetPublic - raw public key matching initialRatchetKeyPair
-   * @param {Uint8Array|null} [params.remoteRatchetPublic] - initiator's ratchet public key, if
+   * @param {{publicKey: Uint8Array, secretKey: Uint8Array}} params.initialPqRatchetKeyPair - our
+   *   already-published PQ prekey (from generatePqPreKeyPair) that the initiator encapsulated against
+   * @param {Uint8Array|null} [params.remoteRatchetPublic] - initiator's X25519 ratchet public key, if
    *   already known from their handshake message; omit to defer until the first decrypt()
+   * @param {Uint8Array|null} [params.remotePqRatchetPublic] - initiator's ML-KEM-768 ratchet public
+   *   key, required whenever remoteRatchetPublic is given
+   * @param {Uint8Array|null} [params.remotePqCipherText] - the ML-KEM ciphertext the initiator sent
+   *   (encapsulated against initialPqRatchetKeyPair.publicKey), required whenever remoteRatchetPublic is given
    */
-  async initAsRecipient(sharedSecret, { initialRatchetKeyPair, initialRatchetPublic, remoteRatchetPublic = null }) {
+  async initAsRecipient(
+    sharedSecret,
+    {
+      initialRatchetKeyPair,
+      initialRatchetPublic,
+      initialPqRatchetKeyPair,
+      remoteRatchetPublic = null,
+      remotePqRatchetPublic = null,
+      remotePqCipherText = null,
+    }
+  ) {
     const { sharedHka, sharedNhkb } = await bootstrapHeaderKeys(sharedSecret);
     this.rootKey = sharedSecret;
     this.localRatchet = initialRatchetKeyPair;
     this.localRatchetPublic = initialRatchetPublic;
+    this.localPqRatchet = initialPqRatchetKeyPair;
     this.headerKeySend = null;
     this.nextHeaderKeySend = sharedNhkb;
     this.headerKeyReceive = null;
     this.nextHeaderKeyReceive = sharedHka;
     if (!remoteRatchetPublic) return;
-    // The initiator's ratchet key is already known (BurnerRoom's signal-init includes it up
-    // front), which is equivalent to a DH ratchet having already conceptually fired -- so this
+    // The initiator's ratchet keys are already known (BurnerRoom's signal-init includes them up
+    // front), which is equivalent to a ratchet step having already conceptually fired -- so this
     // reuses the exact same advance the ratchet takes on every later step.
-    await this._advance(remoteRatchetPublic);
+    await this._advance(remoteRatchetPublic, remotePqRatchetPublic, remotePqCipherText);
   }
 
-  // Shared by _dhRatchet-on-receive and the eager branch of initAsRecipient above: rotate the
-  // receive chain using the CURRENT local ratchet key against the new remote key, promote the
-  // previously-established "next" header keys to "current" on both sides, then generate a fresh
-  // local ratchet keypair and rotate the send chain. next* is always populated by construction
-  // (from the bootstrap, or from a prior kdfRootHE call), so the promotion never needs a
-  // null-guard -- matching Signal's own unconditional HKs=NHKs / HKr=NHKr swap.
-  async _advance(newRemotePublic) {
+  // Shared by decrypt()'s ratchet-detected branch and the eager branch of initAsRecipient above:
+  // rotate the receive chain using the CURRENT local ratchet keys against the new remote keys,
+  // promote the previously-established "next" header keys to "current" on both sides, then
+  // generate fresh local ratchet keypairs and rotate the send chain. next* is always populated by
+  // construction (from the bootstrap, or from a prior kdfRootHE call), so the promotion never
+  // needs a null-guard -- matching Signal's own unconditional HKs=NHKs / HKr=NHKr swap.
+  //
+  // Runs the X25519 DH ratchet and the ML-KEM ratchet side by side, one step each, and mixes both
+  // outputs into every kdfRootHE call. The KEM half is asymmetric where DH is symmetric: the
+  // receive-side step decapsulates newIncomingPqCipherText (which the peer produced by
+  // encapsulating against OUR current -- about to be retired -- localPqRatchet public key), while
+  // the send-side step encapsulates against newRemotePqPublic (the fresh key the peer just
+  // published) to produce the ciphertext THEY'll need to decapsulate next time we hear from them.
+  async _advance(newRemotePublic, newRemotePqPublic, newIncomingPqCipherText) {
     this.previousSendCounter = this.sendCounter;
     this.sendCounter = 0;
     this.receiveCounter = 0;
     this.remoteRatchetPublic = newRemotePublic;
+    this.remotePqRatchetPublic = newRemotePqPublic;
 
     this.headerKeyReceive = this.nextHeaderKeyReceive;
-    let next = await kdfRootHE(this.rootKey, await dh(this.localRatchet.privateKey, this.remoteRatchetPublic));
+    const pqSharedSecretReceive = pqDecapsulate(newIncomingPqCipherText, this.localPqRatchet.secretKey);
+    let next = await kdfRootHE(
+      this.rootKey,
+      await dh(this.localRatchet.privateKey, this.remoteRatchetPublic),
+      pqSharedSecretReceive
+    );
     this.rootKey = next.root;
     this.receiveChainKey = next.chain;
     this.nextHeaderKeyReceive = next.nextHeaderKey;
 
     this.localRatchet = await generateDhKeyPair();
     this.localRatchetPublic = await exportRawPublic(this.localRatchet.publicKey);
+    this.localPqRatchet = generatePqKeyPair();
+    const { cipherText: pqCtSend, sharedSecret: pqSharedSecretSend } = pqEncapsulate(this.remotePqRatchetPublic);
+    this.pqCtToSend = pqCtSend;
     this.headerKeySend = this.nextHeaderKeySend;
-    next = await kdfRootHE(this.rootKey, await dh(this.localRatchet.privateKey, this.remoteRatchetPublic));
+    next = await kdfRootHE(
+      this.rootKey,
+      await dh(this.localRatchet.privateKey, this.remoteRatchetPublic),
+      pqSharedSecretSend
+    );
     this.rootKey = next.root;
     this.sendChainKey = next.chain;
     this.nextHeaderKeySend = next.nextHeaderKey;
@@ -244,7 +311,13 @@ export class DoubleRatchetSession {
     const { messageKey, nextChain } = await kdfChain(this.sendChainKey, counter);
     this.sendChainKey = nextChain;
 
-    const headerObj = { dh: uint8ToBase64(this.localRatchetPublic), pn: this.previousSendCounter, n: counter };
+    const headerObj = {
+      dh: uint8ToBase64(this.localRatchetPublic),
+      pqEk: uint8ToBase64(this.localPqRatchet.publicKey),
+      pqCt: uint8ToBase64(this.pqCtToSend),
+      pn: this.previousSendCounter,
+      n: counter,
+    };
     const { headerIv, header } = await encryptHeader(this.headerKeySend, headerObj);
 
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -313,7 +386,7 @@ export class DoubleRatchetSession {
 
     if (viaNext) {
       if (this.receiveChainKey) await this._skipReceiveKeys(header.pn);
-      await this._advance(base64ToUint8(header.dh));
+      await this._advance(base64ToUint8(header.dh), base64ToUint8(header.pqEk), base64ToUint8(header.pqCt));
     } else if (header.n < this.receiveCounter) {
       throw new Error("Message key already used or unavailable");
     }
