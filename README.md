@@ -44,6 +44,54 @@ anything sensitive.
   body could burn the genuine message's key (making it permanently undecryptable), evict a
   skipped message's cached key, or force a spurious ratchet step — all with zero key material.
 
+## How it compares
+
+The short version: **if a maintained, audited implementation fits your runtime and licensing
+constraints, use it instead of this.** This library exists for the gap where none does — pure-JS
+runtimes (browsers, Cloudflare Workers, Deno) that need PQXDH-style handshakes and a
+post-quantum ratchet today, under a permissive license, without shipping native binaries or WASM.
+
+| | **webcrypto-ratchet** | [`@signalapp/libsignal-client`](https://github.com/signalapp/libsignal) | [`vodozemac`](https://github.com/matrix-org/vodozemac) (Matrix) | [`libsignal-protocol-javascript`](https://github.com/signalapp/libsignal-protocol-javascript) |
+|---|---|---|---|---|
+| **Audited** | ❌ No | ✅ Signal's production core (Rust) | ✅ Least Authority audit | ❌ Deprecated, unmaintained |
+| **Runs in browsers / edge** | ✅ Anywhere WebCrypto + JS run | ❌ Native binaries for Node on Win/macOS/Linux only; no official browser build | ⚠️ Via WASM bindings | ✅ (but abandoned) |
+| **PQ handshake** | ✅ PQXDH-style (ML-KEM-768) | ✅ PQXDH | ❌ Classical 3DH (PQ listed as future work) | ❌ X3DH only |
+| **PQ ratchet** | ✅ ML-KEM mixed into every step | ✅ SPQR | ❌ | ❌ |
+| **Encrypted headers** | ✅ | ❌ (not used by Signal's wire protocol) | ❌ | ❌ |
+| **Wire-compatible with Signal / Matrix** | ❌ (non-goal) | ✅ Signal | ✅ Matrix/Olm | ✅ Signal (historical) |
+| **Group messaging** | ❌ Pairwise only | ✅ (sender keys, zkgroup) | ✅ (Megolm) | ❌ |
+| **License** | MIT | AGPLv3 | Apache-2.0 | GPLv3 |
+| **Dependencies** | 1 (`@noble/post-quantum`, audited) | Native module + Rust toolchain to build | Rust crate / WASM artifact | None (vendored C) |
+| **Key storage / prekey server** | Bring your own | Bring your own (store interfaces) | Pickling built in | Store interfaces |
+
+Where each is the right call:
+
+- **`@signalapp/libsignal-client`** — the default answer for anything high-stakes. It's the
+  production core of Signal itself, in Rust with TypeScript bindings, with PQXDH and the SPQR
+  post-quantum ratchet. Two constraints push people elsewhere: it ships as a **native Node
+  module** (Signal publishes builds for Windows/macOS/Linux — Signal Desktop is Electron, so
+  Signal itself never needs a browser build), and it's **AGPLv3**, which is a hard blocker for
+  many closed-source commercial products. The old pure-JS browser library is officially
+  deprecated in its favor.
+- **`vodozemac`** — the audited Rust implementation of Matrix's Olm/Megolm, usable from the web
+  via WASM bindings, Apache-2.0. Strong choice if you want Matrix interop or group messaging.
+  No post-quantum handshake or ratchet at the time of writing (its docs describe layering
+  external/PQ KEMs on top as an advanced use case), and its recent public
+  cryptographic scrutiny has been contentious — read both the reports and the maintainers'
+  responses and judge for yourself.
+- **[OpenMLS / MLS (RFC 9420)](https://github.com/openmls/openmls)** — not in the table because
+  it solves a different problem: scalable *group* key agreement. If your product is
+  many-to-many rooms rather than pairwise sessions, MLS is the standards-track answer and a
+  pairwise ratchet (this library included) is the wrong shape.
+- **webcrypto-ratchet** — pairwise sessions in pure JS where you control both endpoints and the
+  wire format, want PQ coverage at both the handshake *and* every ratchet step, need encrypted
+  headers, and want MIT licensing with a single audited dependency. You accept the tradeoffs in
+  [Security notes](#security-notes): no independent audit, no Signal interop, no groups, and
+  ~3 KB/message of ML-KEM overhead.
+
+Interoperability with any of the above is explicitly a non-goal — this library's wire format
+(JSON frames, encrypted headers carrying whole KEM payloads) and KDF encoding are its own.
+
 ## Install
 
 Not yet published to npm. Until then, point at it directly:
