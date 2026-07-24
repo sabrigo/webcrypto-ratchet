@@ -16,7 +16,8 @@ anything sensitive.
 - **PQXDH** (`deriveSecretAsInitiator` / `deriveSecretAsRecipient`): a four-way X25519 handshake
   (identity, ephemeral, signed prekey, optional one-time prekey) plus an ML-KEM-768 encapsulation
   against a signed PQ prekey, folded together through HKDF-SHA256 into a single shared secret —
-  matching Signal's own production PQXDH. Both the signed prekey's and the PQ prekey's signatures
+  following the design of Signal's production PQXDH (the KDF encoding details differ; see
+  [Security notes](#security-notes)). Both the signed prekey's and the PQ prekey's signatures
   are verified before use.
 - **Triple Ratchet** (`DoubleRatchetSession`): a fresh AES-256-GCM key for every message, derived
   from a symmetric chain that advances on every send/receive (HMAC-SHA256), plus a ratchet step
@@ -35,6 +36,13 @@ anything sensitive.
   encrypted, under a key that itself rotates on every ratchet step (Signal's "Double Ratchet with
   header encryption" extension) — an observer of the wire frames sees only opaque ciphertext, not
   message cadence or ratchet timing, on top of message content already being confidential.
+- **Atomic decryption**: session state (chain keys, counters, the skip cache, ratchet keypairs)
+  only commits after the message body's AES-GCM tag verifies — anything that throws mid-decrypt
+  rolls every mutation back, per the Double Ratchet spec's "state is only updated if decryption
+  succeeds" requirement. A valid header only proves knowledge of a header key, not body
+  authenticity, so without this an on-path attacker replaying a real frame with a bit-flipped
+  body could burn the genuine message's key (making it permanently undecryptable), evict a
+  skipped message's cached key, or force a spurious ratchet step — all with zero key material.
 
 ## Install
 
@@ -150,11 +158,35 @@ console.log(text(plaintext)); // "hello"
   the X25519 DH output, matching Signal's production Triple Ratchet. Breaking X25519 alone (now,
   or with a future quantum computer) is not enough to recover any step's chain key; ML-KEM would
   also have to fall.
-- **No SPQR-style bandwidth chunking.** Signal's SPQR spreads its ~1KB-per-step ML-KEM payload
-  across multiple messages via erasure coding, purely to fit legacy per-message size budgets. This
-  library sends the ML-KEM public key and ciphertext whole, inside the already-encrypted header —
-  simpler, but it does mean each ratchet-carrying frame is a few KB larger than a pure-X25519
-  Double Ratchet's. That's a bandwidth tradeoff, not a security one.
+- **No SPQR-style bandwidth chunking — every frame carries the KEM material.** Signal's SPQR
+  spreads its ML-KEM payload across multiple messages via erasure coding, purely to fit legacy
+  per-message size budgets. This library sends the ML-KEM public key (1,184 bytes) and ciphertext
+  (1,088 bytes) whole, inside the encrypted header of **every message** — not just
+  ratchet-carrying ones — so each frame carries roughly 3&nbsp;KB of overhead after base64. The
+  upside of the constant size is that ratchet-carrying frames are indistinguishable from ordinary
+  ones even by length; the downside is per-message bandwidth. A tradeoff, not a vulnerability.
+- **Not byte-for-byte Signal's KDF.** The PQXDH secret here is
+  `HKDF(DH1‖DH2‖DH3‖DH4‖SS, salt=SHA-256("pqxdh-v1:"+contextInfo))`; Signal's spec instead
+  prepends a 32-byte `0xFF` pad and uses a zero salt, and signs prekeys with XEdDSA from a single
+  identity key where this library uses a separate Ed25519 signing key. Same structure and DH/KEM
+  inputs, different encoding — interoperability with libsignal is a non-goal.
+- **Bind identities via `contextInfo` — the library doesn't do it for you.** X3DH's spec binds
+  both parties' identity keys into the first message's associated data; here the identities enter
+  the shared secret through DH1/DH2 but are not folded into the AEAD. Put both identity public
+  keys (or a hash of them) into `contextInfo` to get the equivalent binding and close
+  unknown-key-share edge cases.
+- **Handshakes are replayable without one-time prekeys.** If the initiator uses no one-time
+  prekey (and there are no one-time *PQ* prekeys at all — only the signed PQ prekey), an attacker
+  can replay a recorded handshake plus first messages to the recipient, who will derive the same
+  secret and accept the duplicates as a fresh session. This is X3DH's documented limitation, not
+  something this library adds — supply one-time prekeys and/or detect duplicate sessions at the
+  application layer.
+- **Private keys are generated extractable.** X25519/Ed25519 keypairs come from
+  `generateKey(..., extractable=true, ...)` so callers can persist them — which also means any
+  code that can reach the `CryptoKey` objects (e.g. via XSS in a browser) can export them. If you
+  don't need export, re-import your long-term keys as non-extractable in your own storage layer.
+  Chain and root keys live as plain `Uint8Array`s with no zeroization, as is effectively
+  unavoidable in JavaScript.
 
 ## Testing
 
@@ -168,7 +200,11 @@ metadata, header-ciphertext tamper detection, out-of-order delivery within one c
 that arrives late from a chain superseded by a ratchet step (including one skipped two ratchet
 generations ago -- exercising several rounds of the X25519+ML-KEM ratchet steps back to back),
 replay rejection, the `maxSkip` cap, and an HKDF cross-check against node:crypto's independent
-implementation using RFC 5869's test vector.
+implementation using RFC 5869's test vector. Three regression tests pin the atomic-decryption
+guarantee: a tampered body must not burn the in-order message key (the genuine frame still
+decrypts afterward), must not advance or desync the ratchet when it rides a ratchet-carrying
+frame (the session keeps working in both directions), and must not evict a skipped message's
+cached key.
 
 ## License
 
