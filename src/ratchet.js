@@ -375,28 +375,69 @@ export class DoubleRatchetSession {
     if (!header) throw new Error("Unable to decrypt message header");
     validateDecryptedHeader(header);
 
-    // Whichever key matched, the specific counter may already sit in the skip cache -- this is
-    // NOT the same question as "did the chain rotate": in an unrotated chain, the current header
-    // key trivially matches every counter (past, present, or future), so a same-chain skipped
-    // message must still be checked here rather than assumed "new" just because the current key
-    // (not a stale one) is what happened to decrypt its header.
-    const matchedHeaderKeyId = uint8ToBase64(matchedHeaderKey);
-    const cached = this._takeSkippedKey(matchedHeaderKeyId, header.n);
-    if (cached) return this._decryptWith(frame, cached.messageKey, header.n);
+    // From here on the session state mutates (skipped-key consumption, chain advances, ratchet
+    // steps) BEFORE the body's AES-GCM tag has been checked -- but a valid header only proves
+    // knowledge of a header key, not that the body is authentic. An attacker who replays a
+    // legitimate frame with a tampered body must not be able to burn the real message's key or
+    // desync the ratchet. So: snapshot every piece of mutable state now, and roll all of it back
+    // if anything past this point throws -- the Double Ratchet spec's "state is only updated if
+    // decryption succeeds" requirement (DECRYPT's try/catch in the reference pseudocode). All
+    // state transitions are reassignments (byte arrays and cache entries are never mutated in
+    // place), so shallow captures -- including the shallow Map copy -- fully restore.
+    const snapshot = this._captureState();
+    try {
+      // Whichever key matched, the specific counter may already sit in the skip cache -- this is
+      // NOT the same question as "did the chain rotate": in an unrotated chain, the current header
+      // key trivially matches every counter (past, present, or future), so a same-chain skipped
+      // message must still be checked here rather than assumed "new" just because the current key
+      // (not a stale one) is what happened to decrypt its header.
+      const matchedHeaderKeyId = uint8ToBase64(matchedHeaderKey);
+      const cached = this._takeSkippedKey(matchedHeaderKeyId, header.n);
+      if (cached) return await this._decryptWith(frame, cached.messageKey, header.n);
 
-    if (viaNext) {
-      if (this.receiveChainKey) await this._skipReceiveKeys(header.pn);
-      await this._advance(base64ToUint8(header.dh), base64ToUint8(header.pqEk), base64ToUint8(header.pqCt));
-    } else if (header.n < this.receiveCounter) {
-      throw new Error("Message key already used or unavailable");
+      if (viaNext) {
+        if (this.receiveChainKey) await this._skipReceiveKeys(header.pn);
+        await this._advance(base64ToUint8(header.dh), base64ToUint8(header.pqEk), base64ToUint8(header.pqCt));
+      } else if (header.n < this.receiveCounter) {
+        throw new Error("Message key already used or unavailable");
+      }
+
+      if (header.n > this.receiveCounter) await this._skipReceiveKeys(header.n);
+
+      const { messageKey, nextChain } = await kdfChain(this.receiveChainKey, this.receiveCounter);
+      this.receiveChainKey = nextChain;
+      this.receiveCounter += 1;
+      return await this._decryptWith(frame, messageKey, header.n);
+    } catch (error) {
+      this._restoreState(snapshot);
+      throw error;
     }
+  }
 
-    if (header.n > this.receiveCounter) await this._skipReceiveKeys(header.n);
+  _captureState() {
+    return {
+      rootKey: this.rootKey,
+      localRatchet: this.localRatchet,
+      localRatchetPublic: this.localRatchetPublic,
+      remoteRatchetPublic: this.remoteRatchetPublic,
+      localPqRatchet: this.localPqRatchet,
+      remotePqRatchetPublic: this.remotePqRatchetPublic,
+      pqCtToSend: this.pqCtToSend,
+      sendChainKey: this.sendChainKey,
+      receiveChainKey: this.receiveChainKey,
+      sendCounter: this.sendCounter,
+      receiveCounter: this.receiveCounter,
+      previousSendCounter: this.previousSendCounter,
+      headerKeySend: this.headerKeySend,
+      headerKeyReceive: this.headerKeyReceive,
+      nextHeaderKeySend: this.nextHeaderKeySend,
+      nextHeaderKeyReceive: this.nextHeaderKeyReceive,
+      skippedKeys: new Map(this.skippedKeys),
+    };
+  }
 
-    const { messageKey, nextChain } = await kdfChain(this.receiveChainKey, this.receiveCounter);
-    this.receiveChainKey = nextChain;
-    this.receiveCounter += 1;
-    return this._decryptWith(frame, messageKey, header.n);
+  _restoreState(snapshot) {
+    Object.assign(this, snapshot);
   }
 
   async _decryptWith(frame, messageKey, counter) {
