@@ -247,3 +247,56 @@ test("skip count exceeding maxSkip throws instead of growing unbounded", async (
 
   await assert.rejects(() => bobSession.decrypt(lastFrame), /Too many skipped messages/);
 });
+
+// --- commit-only-after-authentication regression tests ---
+// A valid header only proves knowledge of a header key, not body authenticity. An on-path
+// attacker replaying a legitimate frame with a bit-flipped body must not consume the real
+// message's key, evict its skip-cache entry, or force a ratchet step -- the Double Ratchet
+// spec's "state is only updated if decryption succeeds" requirement.
+
+function tamperBody(frame) {
+  const body = base64ToUint8(frame.body);
+  body[0] ^= 0xff;
+  return { ...frame, body: uint8ToBase64(body) };
+}
+
+test("a tampered body does not burn the message key -- the real frame still decrypts", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  const frame = await aliceSession.encrypt(bytes("the real message"));
+  await assert.rejects(() => bobSession.decrypt(tamperBody(frame)));
+  assert.equal(text(await bobSession.decrypt(frame)), "the real message");
+});
+
+test("a tampered ratchet-carrying body does not advance the ratchet or desync the session", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  assert.equal(text(await bobSession.decrypt(await aliceSession.encrypt(bytes("a0")))), "a0");
+  const b0 = await bobSession.encrypt(bytes("b0")); // carries Bob's fresh ratchet keys
+
+  // Attacker injects the tampered copy first -- decrypting it hits Alice's viaNext/_advance
+  // path, which must fully roll back when the body's auth tag check fails.
+  await assert.rejects(() => aliceSession.decrypt(tamperBody(b0)));
+  assert.equal(text(await aliceSession.decrypt(b0)), "b0");
+
+  // And the conversation still works in both directions afterward.
+  assert.equal(text(await bobSession.decrypt(await aliceSession.encrypt(bytes("a1")))), "a1");
+  assert.equal(text(await aliceSession.decrypt(await bobSession.encrypt(bytes("b1")))), "b1");
+});
+
+test("a tampered body does not evict a skipped message's cached key", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  const a0 = await aliceSession.encrypt(bytes("a0")); // delayed -- its key lands in the skip cache
+  const a1 = await aliceSession.encrypt(bytes("a1"));
+  assert.equal(text(await bobSession.decrypt(a1)), "a1"); // skips over a0, caching its key
+
+  await assert.rejects(() => bobSession.decrypt(tamperBody(a0)));
+  assert.equal(text(await bobSession.decrypt(a0)), "a0");
+});
