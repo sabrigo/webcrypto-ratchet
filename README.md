@@ -129,8 +129,11 @@ await recipientSession.initAsRecipient(secret2, {
 
 // --- sending and receiving ---
 const frame = await session.encrypt(bytes("hello"));
-// frame is JSON-safe: { headerIv, header, iv, body } -- send it however you like.
-// The ratchet key and counters are inside the encrypted `header`, not visible on the wire.
+// frame is a single Uint8Array: headerIv(12) || headerCiphertext(2329) || bodyIv(12) || body.
+// Send it as a binary WebSocket/fetch payload, or base64 the whole thing once for JSON
+// transports (uint8ToBase64 / base64ToUint8 are exported). The ratchet keys and counters ride
+// inside the encrypted header -- nothing on the wire is plaintext, and every frame is the same
+// size for the same plaintext length, ratchet step or not.
 
 const plaintext = await recipientSession.decrypt(frame);
 console.log(text(plaintext)); // "hello"
@@ -162,9 +165,15 @@ console.log(text(plaintext)); // "hello"
   spreads its ML-KEM payload across multiple messages via erasure coding, purely to fit legacy
   per-message size budgets. This library sends the ML-KEM public key (1,184 bytes) and ciphertext
   (1,088 bytes) whole, inside the encrypted header of **every message** — not just
-  ratchet-carrying ones — so each frame carries roughly 3&nbsp;KB of overhead after base64. The
-  upside of the constant size is that ratchet-carrying frames are indistinguishable from ordinary
-  ones even by length; the downside is per-message bandwidth. A tradeoff, not a vulnerability.
+  ratchet-carrying ones. With the fixed-offset binary framing that's 2,369 bytes of overhead per
+  message on binary transports (~3.2&nbsp;KB if you base64 the frame once for JSON). The upside
+  of the constant size is that ratchet-carrying frames are indistinguishable from ordinary ones
+  even by length; the downside is per-message bandwidth. A tradeoff, not a vulnerability.
+- **The wire format is fixed-offset binary, versioned inside the encrypted header.** Every header
+  field is a fixed length (X25519 and ML-KEM-768 sizes are constants of the algorithms), so
+  frames parse by offset with no length prefixes, no JSON, and no nested base64. A version byte
+  travels *inside* the header ciphertext — authenticated, so downgrade games with the format
+  version are not possible from the wire.
 - **Not byte-for-byte Signal's KDF.** The PQXDH secret here is
   `HKDF(DH1‖DH2‖DH3‖DH4‖SS, salt=SHA-256("pqxdh-v1:"+contextInfo))`; Signal's spec instead
   prepends a 32-byte `0xFF` pad and uses a zero salt, and signs prekeys with XEdDSA from a single
@@ -204,7 +213,9 @@ implementation using RFC 5869's test vector. Three regression tests pin the atom
 guarantee: a tampered body must not burn the in-order message key (the genuine frame still
 decrypts afterward), must not advance or desync the ratchet when it rides a ratchet-carrying
 frame (the session keeps working in both directions), and must not evict a skipped message's
-cached key.
+cached key. The wire-format tests pin that a frame is a single `Uint8Array` containing no
+verbatim key-material bytes, and that frames are constant-size for equal plaintexts whether or
+not they carry a ratchet step.
 
 ## License
 
