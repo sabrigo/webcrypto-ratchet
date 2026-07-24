@@ -29,10 +29,8 @@ import {
   hmac,
   hkdf,
   bytes,
-  text,
   concatBytes,
   uint8ToBase64,
-  base64ToUint8,
   generateDhKeyPair,
   exportRawPublic,
 } from "./primitives.js";
@@ -45,6 +43,32 @@ const CHAIN_LABEL = bytes("chain:");
 const EMPTY_SALT = new Uint8Array(0);
 const DEFAULT_MAX_SKIP = 1000;
 const DEFAULT_AAD_PREFIX = "ratchet-msg";
+
+// --- binary wire format (v1) ---
+// Every field in the header is fixed-length (X25519 and ML-KEM-768 sizes are constants of the
+// algorithms), so the header needs no length prefixes and the whole frame parses by offset:
+//
+//   frame := headerIv(12) || headerCiphertext(2329) || bodyIv(12) || bodyCiphertext(>=16)
+//   header plaintext := version(1) || dh(32) || pqEk(1184) || pqCt(1088) || pn(4 BE) || n(4 BE)
+//
+// One frame is one Uint8Array -- send it as a binary WebSocket/fetch payload, or base64 the
+// whole thing once for JSON transports. Constant header size also means ratchet-carrying frames
+// are indistinguishable from ordinary ones even by length.
+const HEADER_VERSION = 1;
+const DH_PUBLIC_LENGTH = 32; // X25519 raw public key
+const PQ_PUBLIC_LENGTH = 1184; // ML-KEM-768 encapsulation key
+const PQ_CIPHERTEXT_LENGTH = 1088; // ML-KEM-768 ciphertext
+const COUNTER_LENGTH = 4; // uint32 big-endian
+const MAX_COUNTER = 0xffffffff;
+const IV_LENGTH = 12;
+const GCM_TAG_LENGTH = 16;
+const HEADER_PLAINTEXT_LENGTH =
+  1 + DH_PUBLIC_LENGTH + PQ_PUBLIC_LENGTH + PQ_CIPHERTEXT_LENGTH + COUNTER_LENGTH + COUNTER_LENGTH; // 2313
+const HEADER_CIPHERTEXT_LENGTH = HEADER_PLAINTEXT_LENGTH + GCM_TAG_LENGTH; // 2329
+const HEADER_CT_OFFSET = IV_LENGTH; // 12
+const BODY_IV_OFFSET = HEADER_CT_OFFSET + HEADER_CIPHERTEXT_LENGTH; // 2341
+const BODY_OFFSET = BODY_IV_OFFSET + IV_LENGTH; // 2353
+const MIN_FRAME_LENGTH = BODY_OFFSET + GCM_TAG_LENGTH; // 2369 -- empty plaintext still has a GCM tag
 
 async function kdfRootHE(rootKey, dhOutput, pqSharedSecret) {
   const material = await hkdf(concatBytes(dhOutput, pqSharedSecret), rootKey, ROOT_INFO, 96);
@@ -68,13 +92,55 @@ async function bootstrapHeaderKeys(sharedSecret) {
   return { sharedHka: material.slice(0, 32), sharedNhkb: material.slice(32, 64) };
 }
 
-async function encryptHeader(headerKeyBytes, headerObj) {
+function encodeHeader(dhPublic, pqPublic, pqCipherText, pn, n) {
+  if (dhPublic.length !== DH_PUBLIC_LENGTH) throw new Error("Invalid header field: dh length");
+  if (pqPublic.length !== PQ_PUBLIC_LENGTH) throw new Error("Invalid header field: pqEk length");
+  if (pqCipherText.length !== PQ_CIPHERTEXT_LENGTH) throw new Error("Invalid header field: pqCt length");
+  if (!Number.isInteger(pn) || pn < 0 || pn > MAX_COUNTER) throw new Error("Invalid header field: pn");
+  if (!Number.isInteger(n) || n < 0 || n > MAX_COUNTER) throw new Error("Invalid header field: n");
+  const out = new Uint8Array(HEADER_PLAINTEXT_LENGTH);
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  out[offset] = HEADER_VERSION;
+  offset += 1;
+  out.set(dhPublic, offset);
+  offset += DH_PUBLIC_LENGTH;
+  out.set(pqPublic, offset);
+  offset += PQ_PUBLIC_LENGTH;
+  out.set(pqCipherText, offset);
+  offset += PQ_CIPHERTEXT_LENGTH;
+  view.setUint32(offset, pn);
+  offset += COUNTER_LENGTH;
+  view.setUint32(offset, n);
+  return out;
+}
+
+// The header ciphertext is authenticated (GCM), so by the time this runs the bytes are known to
+// come from a holder of the header key -- these checks guard format drift, not attackers.
+function decodeHeader(plain) {
+  if (plain.length !== HEADER_PLAINTEXT_LENGTH) throw new Error("Invalid decrypted header: length");
+  if (plain[0] !== HEADER_VERSION) throw new Error("Invalid decrypted header: version");
+  const view = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
+  let offset = 1;
+  const dh = plain.slice(offset, offset + DH_PUBLIC_LENGTH);
+  offset += DH_PUBLIC_LENGTH;
+  const pqEk = plain.slice(offset, offset + PQ_PUBLIC_LENGTH);
+  offset += PQ_PUBLIC_LENGTH;
+  const pqCt = plain.slice(offset, offset + PQ_CIPHERTEXT_LENGTH);
+  offset += PQ_CIPHERTEXT_LENGTH;
+  const pn = view.getUint32(offset);
+  offset += COUNTER_LENGTH;
+  const n = view.getUint32(offset);
+  return { dh, pqEk, pqCt, pn, n };
+}
+
+async function encryptHeader(headerKeyBytes, headerPlain) {
   const headerKey = await crypto.subtle.importKey("raw", headerKeyBytes, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
-  const headerIv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv: headerIv }, headerKey, bytes(JSON.stringify(headerObj)))
+  const headerIv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const headerCiphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: "AES-GCM", iv: headerIv }, headerKey, headerPlain)
   );
-  return { headerIv: uint8ToBase64(headerIv), header: uint8ToBase64(ciphertext) };
+  return { headerIv, headerCiphertext };
 }
 
 // Throws (via crypto.subtle.decrypt's GCM auth-tag check) if headerKeyBytes is the wrong key --
@@ -82,32 +148,22 @@ async function encryptHeader(headerKeyBytes, headerObj) {
 async function decryptHeader(headerKeyBytes, frame) {
   const headerKey = await crypto.subtle.importKey("raw", headerKeyBytes, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
   const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToUint8(frame.headerIv) },
+    { name: "AES-GCM", iv: frame.subarray(0, IV_LENGTH) },
     headerKey,
-    base64ToUint8(frame.header)
+    frame.subarray(HEADER_CT_OFFSET, BODY_IV_OFFSET)
   );
-  return JSON.parse(text(plaintext));
+  return decodeHeader(new Uint8Array(plaintext));
 }
 
+// Binds the body to the exact header bytes on the wire (IV + ciphertext) plus the counter and a
+// caller-chosen domain-separation prefix.
 function messageAdditionalData(prefix, counter, frame) {
-  return concatBytes(bytes(`${prefix}:${counter}:`), base64ToUint8(frame.headerIv), base64ToUint8(frame.header));
+  return concatBytes(bytes(`${prefix}:${counter}:`), frame.subarray(0, BODY_IV_OFFSET));
 }
 
 function validateFrame(frame) {
-  if (!frame || typeof frame !== "object") throw new Error("Invalid ratchet frame");
-  if (typeof frame.headerIv !== "string" || !frame.headerIv) throw new Error("Invalid ratchet frame: headerIv");
-  if (typeof frame.header !== "string" || !frame.header) throw new Error("Invalid ratchet frame: header");
-  if (typeof frame.iv !== "string" || !frame.iv) throw new Error("Invalid ratchet frame: iv");
-  if (typeof frame.body !== "string" || !frame.body) throw new Error("Invalid ratchet frame: body");
-}
-
-function validateDecryptedHeader(header) {
-  if (!header || typeof header !== "object") throw new Error("Invalid decrypted header");
-  if (typeof header.dh !== "string" || !header.dh) throw new Error("Invalid decrypted header: dh");
-  if (typeof header.pqEk !== "string" || !header.pqEk) throw new Error("Invalid decrypted header: pqEk");
-  if (typeof header.pqCt !== "string" || !header.pqCt) throw new Error("Invalid decrypted header: pqCt");
-  if (!Number.isInteger(header.n) || header.n < 0) throw new Error("Invalid decrypted header: n");
-  if (!Number.isInteger(header.pn) || header.pn < 0) throw new Error("Invalid decrypted header: pn");
+  if (!(frame instanceof Uint8Array)) throw new Error("Invalid ratchet frame: expected Uint8Array");
+  if (frame.length < MIN_FRAME_LENGTH) throw new Error("Invalid ratchet frame: too short");
 }
 
 export class DoubleRatchetSession {
@@ -304,30 +360,35 @@ export class DoubleRatchetSession {
     return entry || null;
   }
 
-  /** Encrypts plaintext bytes into a frame ready to send: {headerIv, header, iv, body}, all base64. */
+  /**
+   * Encrypts plaintext bytes into a single binary frame ready to send (see the wire-format
+   * comment above): headerIv(12) || headerCiphertext(2329) || bodyIv(12) || bodyCiphertext.
+   * Send it as a binary payload, or base64 the whole Uint8Array once for JSON transports.
+   */
   async encrypt(plaintextBytes) {
     if (!this.sendChainKey) throw new Error("Ratchet session not ready to send");
+    if (this.sendCounter > MAX_COUNTER) throw new Error("Send counter exhausted");
     const counter = this.sendCounter++;
     const { messageKey, nextChain } = await kdfChain(this.sendChainKey, counter);
     this.sendChainKey = nextChain;
 
-    const headerObj = {
-      dh: uint8ToBase64(this.localRatchetPublic),
-      pqEk: uint8ToBase64(this.localPqRatchet.publicKey),
-      pqCt: uint8ToBase64(this.pqCtToSend),
-      pn: this.previousSendCounter,
-      n: counter,
-    };
-    const { headerIv, header } = await encryptHeader(this.headerKeySend, headerObj);
+    const headerPlain = encodeHeader(
+      this.localRatchetPublic,
+      this.localPqRatchet.publicKey,
+      this.pqCtToSend,
+      this.previousSendCounter,
+      counter
+    );
+    const { headerIv, headerCiphertext } = await encryptHeader(this.headerKeySend, headerPlain);
 
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const frameForAad = { headerIv, header };
-    const additionalData = messageAdditionalData(this.associatedDataPrefix, counter, frameForAad);
-    const ciphertext = new Uint8Array(
-      await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData }, messageKey, plaintextBytes)
+    const bodyIv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+    const headerSection = concatBytes(headerIv, headerCiphertext);
+    const additionalData = concatBytes(bytes(`${this.associatedDataPrefix}:${counter}:`), headerSection);
+    const bodyCiphertext = new Uint8Array(
+      await crypto.subtle.encrypt({ name: "AES-GCM", iv: bodyIv, additionalData }, messageKey, plaintextBytes)
     );
 
-    return { headerIv, header, iv: uint8ToBase64(iv), body: uint8ToBase64(ciphertext) };
+    return concatBytes(headerSection, bodyIv, bodyCiphertext);
   }
 
   /**
@@ -373,7 +434,6 @@ export class DoubleRatchetSession {
       }
     }
     if (!header) throw new Error("Unable to decrypt message header");
-    validateDecryptedHeader(header);
 
     // From here on the session state mutates (skipped-key consumption, chain advances, ratchet
     // steps) BEFORE the body's AES-GCM tag has been checked -- but a valid header only proves
@@ -397,7 +457,7 @@ export class DoubleRatchetSession {
 
       if (viaNext) {
         if (this.receiveChainKey) await this._skipReceiveKeys(header.pn);
-        await this._advance(base64ToUint8(header.dh), base64ToUint8(header.pqEk), base64ToUint8(header.pqCt));
+        await this._advance(header.dh, header.pqEk, header.pqCt);
       } else if (header.n < this.receiveCounter) {
         throw new Error("Message key already used or unavailable");
       }
@@ -443,9 +503,9 @@ export class DoubleRatchetSession {
   async _decryptWith(frame, messageKey, counter) {
     const additionalData = messageAdditionalData(this.associatedDataPrefix, counter, frame);
     const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: base64ToUint8(frame.iv), additionalData },
+      { name: "AES-GCM", iv: frame.subarray(BODY_IV_OFFSET, BODY_OFFSET), additionalData },
       messageKey,
-      base64ToUint8(frame.body)
+      frame.subarray(BODY_OFFSET)
     );
     return new Uint8Array(plaintext);
   }

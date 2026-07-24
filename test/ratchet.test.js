@@ -133,20 +133,53 @@ test("handshake + first message roundtrip", async () => {
   assert.equal(text(plaintext), "hello bob");
 });
 
-test("the wire frame carries no plaintext routing metadata", async () => {
+function containsSubarray(haystack, needle) {
+  outer: for (let i = 0; i + needle.length <= haystack.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return true;
+  }
+  return false;
+}
+
+test("the wire frame is a single Uint8Array carrying no plaintext routing metadata", async () => {
   const alice = await createParty();
   const bob = await createParty();
   const { aliceSession } = await handshake(alice, bob);
 
   const frame = await aliceSession.encrypt(bytes("hello"));
-  assert.equal(frame.dh, undefined);
-  assert.equal(frame.n, undefined);
-  assert.equal(frame.pn, undefined);
-  assert.equal(typeof frame.headerIv, "string");
-  assert.equal(typeof frame.header, "string");
-  assert.equal(typeof frame.iv, "string");
-  assert.equal(typeof frame.body, "string");
+  assert.ok(frame instanceof Uint8Array);
+  // The ratchet public keys and KEM ciphertext ride inside the encrypted header -- none of
+  // their bytes may appear verbatim anywhere in the frame.
+  assert.equal(containsSubarray(frame, aliceSession.localRatchetPublic), false);
+  assert.equal(containsSubarray(frame, aliceSession.localPqRatchet.publicKey), false);
+  assert.equal(containsSubarray(frame, aliceSession.pqCtToSend), false);
 });
+
+test("frames are constant-size for equal plaintexts, ratchet step or not", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  const a0 = await aliceSession.encrypt(bytes("same length!"));
+  const a1 = await aliceSession.encrypt(bytes("same length!")); // same chain, no ratchet
+  assert.equal(text(await bobSession.decrypt(a0)), "same length!");
+  assert.equal(text(await bobSession.decrypt(a1)), "same length!");
+
+  const b0 = await bobSession.encrypt(bytes("same length!")); // Bob's first send -- fresh ratchet keys
+  assert.equal(text(await aliceSession.decrypt(b0)), "same length!");
+
+  // A length-observer must not be able to tell ratchet-carrying frames from ordinary ones.
+  assert.equal(a0.length, a1.length);
+  assert.equal(a0.length, b0.length);
+});
+
+function flipByte(frame, offset) {
+  const copy = frame.slice();
+  copy[offset] ^= 0xff;
+  return copy;
+}
 
 test("a tampered header ciphertext fails to decrypt", async () => {
   const alice = await createParty();
@@ -154,11 +187,7 @@ test("a tampered header ciphertext fails to decrypt", async () => {
   const { aliceSession, bobSession } = await handshake(alice, bob);
 
   const frame = await aliceSession.encrypt(bytes("hello"));
-  const tamperedHeader = base64ToUint8(frame.header);
-  tamperedHeader[0] ^= 0xff;
-  const tampered = { ...frame, header: uint8ToBase64(tamperedHeader) };
-
-  await assert.rejects(() => bobSession.decrypt(tampered));
+  await assert.rejects(() => bobSession.decrypt(flipByte(frame, 12))); // first header-ciphertext byte
 });
 
 test("out-of-order delivery within one chain uses the skipped-key cache", async () => {
@@ -255,9 +284,7 @@ test("skip count exceeding maxSkip throws instead of growing unbounded", async (
 // spec's "state is only updated if decryption succeeds" requirement.
 
 function tamperBody(frame) {
-  const body = base64ToUint8(frame.body);
-  body[0] ^= 0xff;
-  return { ...frame, body: uint8ToBase64(body) };
+  return flipByte(frame, frame.length - 1); // last body-ciphertext byte -- inside the GCM tag
 }
 
 test("a tampered body does not burn the message key -- the real frame still decrypts", async () => {
