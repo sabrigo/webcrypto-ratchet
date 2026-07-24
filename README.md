@@ -137,6 +137,7 @@ const pqPreKeySignature = await signBytes(signing.privateKey, pqPreKey.publicKey
 const ephemeral = await generateDhKeyPair();
 const { secret, pqCipherText } = await deriveSecretAsInitiator({
   identityPrivateKey: myIdentity.privateKey,
+  identityPublicKeyRaw: myIdentityPublic, // bound into the KDF alongside the peer's
   ephemeralPrivateKey: ephemeral.privateKey,
   peerIdentityPublicKeyRaw: theirIdentityPublic,
   peerSignedPreKeyPublicRaw: theirSignedPreKeyPublic,
@@ -157,6 +158,7 @@ await session.initAsInitiator(secret, theirSignedPreKeyPublic, theirPqPreKeyPubl
 // --- the recipient joins the session ---
 const secret2 = await deriveSecretAsRecipient({
   identityPrivateKey: myIdentity.privateKey,
+  identityPublicKeyRaw: myIdentityPublic,
   signedPreKeyPrivateKey: signedPreKey.privateKey,
   peerIdentityPublicKeyRaw: initiatorIdentityPublic,
   peerEphemeralPublicKeyRaw: initiatorEphemeralPublic,
@@ -227,11 +229,13 @@ console.log(text(plaintext)); // "hello"
   prepends a 32-byte `0xFF` pad and uses a zero salt, and signs prekeys with XEdDSA from a single
   identity key where this library uses a separate Ed25519 signing key. Same structure and DH/KEM
   inputs, different encoding — interoperability with libsignal is a non-goal.
-- **Bind identities via `contextInfo` — the library doesn't do it for you.** X3DH's spec binds
-  both parties' identity keys into the first message's associated data; here the identities enter
-  the shared secret through DH1/DH2 but are not folded into the AEAD. Put both identity public
-  keys (or a hash of them) into `contextInfo` to get the equivalent binding and close
-  unknown-key-share edge cases.
+- **Both X25519 identity keys are bound into the root KDF, by role.** The KDF info is
+  `"webcrypto-ratchet-pqxdh-root-v2" || IK_initiator || IK_recipient`, the analogue of X3DH's
+  `AD = Encode(IK_A) || Encode(IK_B)` — a derived secret can only ever be interpreted as
+  belonging to that ordered pair of identities, closing unknown-key-share edge cases. The
+  Ed25519 *signing* keys are **not** bound: if your identity model treats the signing key as a
+  separate trust root rather than an attribute of the X25519 identity, fold both signing public
+  keys into `contextInfo` yourself.
 - **Handshakes are replayable without one-time prekeys.** If the initiator uses no one-time
   prekey (and there are no one-time *PQ* prekeys at all — only the signed PQ prekey), an attacker
   can replay a recorded handshake plus first messages to the recipient, who will derive the same

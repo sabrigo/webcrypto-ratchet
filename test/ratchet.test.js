@@ -41,6 +41,7 @@ async function handshake(alice, bob) {
 
   const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
     identityPrivateKey: alice.identity.privateKey,
+    identityPublicKeyRaw: alice.identityPublicRaw,
     ephemeralPrivateKey: ephemeral.privateKey,
     peerIdentityPublicKeyRaw: bob.identityPublicRaw,
     peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
@@ -53,6 +54,7 @@ async function handshake(alice, bob) {
 
   const bobSecret = await deriveSecretAsRecipient({
     identityPrivateKey: bob.identity.privateKey,
+    identityPublicKeyRaw: bob.identityPublicRaw,
     signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
     peerIdentityPublicKeyRaw: alice.identityPublicRaw,
     peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
@@ -88,6 +90,7 @@ test("X3DH signature check rejects a tampered signed prekey", async () => {
     () =>
       deriveSecretAsInitiator({
         identityPrivateKey: alice.identity.privateKey,
+        identityPublicKeyRaw: alice.identityPublicRaw,
         ephemeralPrivateKey: ephemeral.privateKey,
         peerIdentityPublicKeyRaw: bob.identityPublicRaw,
         peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
@@ -110,6 +113,7 @@ test("PQXDH signature check rejects a tampered PQ prekey", async () => {
     () =>
       deriveSecretAsInitiator({
         identityPrivateKey: alice.identity.privateKey,
+        identityPublicKeyRaw: alice.identityPublicRaw,
         ephemeralPrivateKey: ephemeral.privateKey,
         peerIdentityPublicKeyRaw: bob.identityPublicRaw,
         peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
@@ -326,4 +330,53 @@ test("a tampered body does not evict a skipped message's cached key", async () =
 
   await assert.rejects(() => bobSession.decrypt(tamperBody(a0)));
   assert.equal(text(await bobSession.decrypt(a0)), "a0");
+});
+
+test("the root secret binds both identity keys by role, not just via the DH outputs", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const mallory = await createParty();
+  const ephemeral = await generateDhKeyPair();
+  const ephemeralPublicRaw = await exportRawPublic(ephemeral.publicKey);
+
+  const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
+    identityPrivateKey: alice.identity.privateKey,
+    identityPublicKeyRaw: alice.identityPublicRaw,
+    ephemeralPrivateKey: ephemeral.privateKey,
+    peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+    peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+    peerSignedPreKeySignature: bob.signedPreKeySignature,
+    peerSigningPublicKeyRaw: bob.signingPublicRaw,
+    peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+    peerPqPreKeySignature: bob.pqPreKeySignature,
+    contextInfo: CONTEXT,
+  });
+
+  // Identical DH/KEM inputs on Bob's side, but the KDF is fed a different recipient identity
+  // (Mallory's). Every DH output is unchanged -- identityPublicKeyRaw feeds only the binding --
+  // so if the secrets still matched, the binding would be dead code.
+  const misbound = await deriveSecretAsRecipient({
+    identityPrivateKey: bob.identity.privateKey,
+    identityPublicKeyRaw: mallory.identityPublicRaw, // wrong identity claimed for the recipient role
+    signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
+    peerIdentityPublicKeyRaw: alice.identityPublicRaw,
+    peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
+    pqPreKeySecretKey: bob.pqPreKey.secretKey,
+    pqCipherText,
+    contextInfo: CONTEXT,
+  });
+  assert.notDeepStrictEqual(aliceSecret, misbound);
+
+  // And with the honest identity, agreement holds as before.
+  const bound = await deriveSecretAsRecipient({
+    identityPrivateKey: bob.identity.privateKey,
+    identityPublicKeyRaw: bob.identityPublicRaw,
+    signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
+    peerIdentityPublicKeyRaw: alice.identityPublicRaw,
+    peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
+    pqPreKeySecretKey: bob.pqPreKey.secretKey,
+    pqCipherText,
+    contextInfo: CONTEXT,
+  });
+  assert.deepStrictEqual(aliceSecret, bound);
 });

@@ -14,14 +14,27 @@ import { generatePqKeyPair, pqEncapsulate, pqDecapsulate } from "./pq.js";
  * Ed25519 identity key (same as a signed prekey) before publishing it. */
 export const generatePqPreKeyPair = generatePqKeyPair;
 
-async function x3dhRootSecret(dhOutputs, pqSharedSecret, contextInfo) {
-  const salt = await sha256(bytes(`pqxdh-v1:${contextInfo}`));
-  return hkdf(concatBytes(...dhOutputs, pqSharedSecret), salt, bytes("webcrypto-ratchet-pqxdh-root"), 32);
+const IDENTITY_KEY_LENGTH = 32; // X25519 raw public key
+
+// The X3DH spec binds AD = Encode(IK_initiator) || Encode(IK_recipient) into the protocol so
+// that a secret can only ever be interpreted as belonging to one ordered pair of identities --
+// closing unknown-key-share attacks where a MITM convinces one party they're talking to someone
+// else without breaking any DH. The identity keys already enter the DH outputs (dh1/dh2), but
+// folding them into the KDF *by role* is what pins WHO is initiator and WHO is recipient. Both
+// fields are fixed-length, so concatenation is unambiguous without length prefixes.
+async function x3dhRootSecret(dhOutputs, pqSharedSecret, contextInfo, initiatorIdentityPublic, recipientIdentityPublic) {
+  if (initiatorIdentityPublic.length !== IDENTITY_KEY_LENGTH) throw new Error("Invalid initiator identity key length");
+  if (recipientIdentityPublic.length !== IDENTITY_KEY_LENGTH) throw new Error("Invalid recipient identity key length");
+  const salt = await sha256(bytes(`pqxdh-v2:${contextInfo}`));
+  const info = concatBytes(bytes("webcrypto-ratchet-pqxdh-root-v2"), initiatorIdentityPublic, recipientIdentityPublic);
+  return hkdf(concatBytes(...dhOutputs, pqSharedSecret), salt, info, 32);
 }
 
 /**
  * @param {object} params
  * @param {CryptoKey} params.identityPrivateKey - our long-term X25519 identity private key
+ * @param {Uint8Array} params.identityPublicKeyRaw - our long-term X25519 identity public key (raw),
+ *   bound into the KDF alongside the peer's so the secret pins both identities in their roles
  * @param {CryptoKey} params.ephemeralPrivateKey - a fresh X25519 keypair's private key, generated for this handshake
  * @param {Uint8Array} params.peerIdentityPublicKeyRaw - peer's long-term X25519 identity public key
  * @param {Uint8Array} params.peerSignedPreKeyPublicRaw - peer's published signed prekey (X25519 public)
@@ -37,6 +50,7 @@ async function x3dhRootSecret(dhOutputs, pqSharedSecret, contextInfo) {
  */
 export async function deriveSecretAsInitiator({
   identityPrivateKey,
+  identityPublicKeyRaw,
   ephemeralPrivateKey,
   peerIdentityPublicKeyRaw,
   peerSignedPreKeyPublicRaw,
@@ -59,13 +73,20 @@ export async function deriveSecretAsInitiator({
   const dh4 = peerOneTimePreKeyPublicRaw ? await dh(ephemeralPrivateKey, peerOneTimePreKeyPublicRaw) : new Uint8Array();
   const { cipherText: pqCipherText, sharedSecret: pqSharedSecret } = pqEncapsulate(peerPqPreKeyPublic);
 
-  const secret = await x3dhRootSecret([dh1, dh2, dh3, dh4], pqSharedSecret, contextInfo);
+  const secret = await x3dhRootSecret(
+    [dh1, dh2, dh3, dh4],
+    pqSharedSecret,
+    contextInfo,
+    identityPublicKeyRaw, // we are the initiator
+    peerIdentityPublicKeyRaw
+  );
   return { secret, pqCipherText };
 }
 
 /**
  * @param {object} params
  * @param {CryptoKey} params.identityPrivateKey - our long-term X25519 identity private key
+ * @param {Uint8Array} params.identityPublicKeyRaw - our long-term X25519 identity public key (raw)
  * @param {CryptoKey} params.signedPreKeyPrivateKey - the signed prekey's private key the initiator used
  * @param {Uint8Array} params.peerIdentityPublicKeyRaw - initiator's long-term X25519 identity public key
  * @param {Uint8Array} params.peerEphemeralPublicKeyRaw - initiator's fresh ephemeral public key
@@ -77,6 +98,7 @@ export async function deriveSecretAsInitiator({
  */
 export async function deriveSecretAsRecipient({
   identityPrivateKey,
+  identityPublicKeyRaw,
   signedPreKeyPrivateKey,
   peerIdentityPublicKeyRaw,
   peerEphemeralPublicKeyRaw,
@@ -91,5 +113,11 @@ export async function deriveSecretAsRecipient({
   const dh4 = oneTimePreKeyPrivateKey ? await dh(oneTimePreKeyPrivateKey, peerEphemeralPublicKeyRaw) : new Uint8Array();
   const pqSharedSecret = pqDecapsulate(pqCipherText, pqPreKeySecretKey);
 
-  return x3dhRootSecret([dh1, dh2, dh3, dh4], pqSharedSecret, contextInfo);
+  return x3dhRootSecret(
+    [dh1, dh2, dh3, dh4],
+    pqSharedSecret,
+    contextInfo,
+    peerIdentityPublicKeyRaw, // the peer initiated
+    identityPublicKeyRaw
+  );
 }
