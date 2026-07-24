@@ -380,3 +380,137 @@ test("the root secret binds both identity keys by role, not just via the DH outp
   });
   assert.deepStrictEqual(aliceSecret, bound);
 });
+
+test("deriveSecretAsInitiator rejects a malformed local identity key before deriving the root secret", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const ephemeral = await generateDhKeyPair();
+
+  await assert.rejects(
+    () =>
+      deriveSecretAsInitiator({
+        identityPrivateKey: alice.identity.privateKey,
+        identityPublicKeyRaw: alice.identityPublicRaw.slice(1),
+        ephemeralPrivateKey: ephemeral.privateKey,
+        peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+        peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+        peerSignedPreKeySignature: bob.signedPreKeySignature,
+        peerSigningPublicKeyRaw: bob.signingPublicRaw,
+        peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+        peerPqPreKeySignature: bob.pqPreKeySignature,
+        contextInfo: CONTEXT,
+      }),
+    /Invalid initiator identity key length/
+  );
+});
+
+test("deriveSecretAsRecipient rejects a malformed local identity key before deriving the root secret", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const ephemeral = await generateDhKeyPair();
+  const ephemeralPublicRaw = await exportRawPublic(ephemeral.publicKey);
+  const { pqCipherText } = await deriveSecretAsInitiator({
+    identityPrivateKey: alice.identity.privateKey,
+    identityPublicKeyRaw: alice.identityPublicRaw,
+    ephemeralPrivateKey: ephemeral.privateKey,
+    peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+    peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+    peerSignedPreKeySignature: bob.signedPreKeySignature,
+    peerSigningPublicKeyRaw: bob.signingPublicRaw,
+    peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+    peerPqPreKeySignature: bob.pqPreKeySignature,
+    contextInfo: CONTEXT,
+  });
+
+  await assert.rejects(
+    () =>
+      deriveSecretAsRecipient({
+        identityPrivateKey: bob.identity.privateKey,
+        identityPublicKeyRaw: bob.identityPublicRaw.slice(1),
+        signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
+        peerIdentityPublicKeyRaw: alice.identityPublicRaw,
+        peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
+        pqPreKeySecretKey: bob.pqPreKey.secretKey,
+        pqCipherText,
+        contextInfo: CONTEXT,
+      }),
+    /Invalid recipient identity key length/
+  );
+});
+
+test("canSend reflects whether a send chain has been established yet", async () => {
+  assert.equal(new DoubleRatchetSession().canSend, false);
+
+  const alice = await createParty();
+  const bob = await createParty();
+  const ephemeral = await generateDhKeyPair();
+  const ephemeralPublicRaw = await exportRawPublic(ephemeral.publicKey);
+
+  const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
+    identityPrivateKey: alice.identity.privateKey,
+    identityPublicKeyRaw: alice.identityPublicRaw,
+    ephemeralPrivateKey: ephemeral.privateKey,
+    peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+    peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+    peerSignedPreKeySignature: bob.signedPreKeySignature,
+    peerSigningPublicKeyRaw: bob.signingPublicRaw,
+    peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+    peerPqPreKeySignature: bob.pqPreKeySignature,
+    contextInfo: CONTEXT,
+  });
+  const bobSecret = await deriveSecretAsRecipient({
+    identityPrivateKey: bob.identity.privateKey,
+    identityPublicKeyRaw: bob.identityPublicRaw,
+    signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
+    peerIdentityPublicKeyRaw: alice.identityPublicRaw,
+    peerEphemeralPublicKeyRaw: ephemeralPublicRaw,
+    pqPreKeySecretKey: bob.pqPreKey.secretKey,
+    pqCipherText,
+    contextInfo: CONTEXT,
+  });
+
+  const aliceSession = new DoubleRatchetSession();
+  await aliceSession.initAsInitiator(aliceSecret, bob.signedPreKeyPublicRaw, bob.pqPreKey.publicKey);
+  assert.equal(aliceSession.canSend, true, "initiator has a send chain immediately");
+
+  // A recipient session that hasn't been told the initiator's ratchet keys yet (deferred until
+  // the first decrypt()) has no send chain -- it can only receive.
+  const bobSession = new DoubleRatchetSession();
+  await bobSession.initAsRecipient(bobSecret, {
+    initialRatchetKeyPair: bob.signedPreKey,
+    initialRatchetPublic: bob.signedPreKeyPublicRaw,
+    initialPqRatchetKeyPair: bob.pqPreKey,
+  });
+  assert.equal(bobSession.canSend, false);
+
+  const frame = await aliceSession.encrypt(bytes("first"));
+  assert.equal(text(await bobSession.decrypt(frame)), "first");
+  assert.equal(bobSession.canSend, true, "receiving the first message ratchets a send chain into place");
+});
+
+test("the skipped-key cache evicts its oldest entry once it exceeds maxSkip, across ratchet generations", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+  bobSession.maxSkip = 1;
+
+  // Generation A: a0 is skipped (and cached) while decrypting a1 directly.
+  const a0 = await aliceSession.encrypt(bytes("a0"));
+  const a1 = await aliceSession.encrypt(bytes("a1"));
+  assert.equal(text(await bobSession.decrypt(a1)), "a1");
+  assert.equal(bobSession.skippedKeys.size, 1);
+
+  // Bob's reply causes Alice to DH-ratchet forward into generation B.
+  const b0 = await bobSession.encrypt(bytes("b0"));
+  assert.equal(text(await aliceSession.decrypt(b0)), "b0");
+
+  // Generation B: c0 is skipped while decrypting c1, which forces Bob to ratchet too. That
+  // second cached entry pushes the cache past maxSkip, evicting generation A's a0 entry.
+  const c0 = await aliceSession.encrypt(bytes("c0"));
+  const c1 = await aliceSession.encrypt(bytes("c1"));
+  assert.equal(text(await bobSession.decrypt(c1)), "c1");
+  assert.equal(bobSession.skippedKeys.size, 1, "cache never grows past maxSkip");
+
+  await assert.rejects(() => bobSession.decrypt(a0), "the evicted generation-A key is gone for good");
+  assert.equal(text(await bobSession.decrypt(c0)), "c0", "the newer generation-B key survived the eviction");
+});
