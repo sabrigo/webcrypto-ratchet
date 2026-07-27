@@ -94,14 +94,8 @@ Interoperability with any of the above is explicitly a non-goal — this library
 
 ## Install
 
-Not yet published to npm. Until then, point at it directly:
-
-```json
-{
-  "dependencies": {
-    "webcrypto-ratchet": "file:../path/to/webcrypto-ratchet"
-  }
-}
+```sh
+npm install webcrypto-ratchet
 ```
 
 ## Usage
@@ -225,7 +219,7 @@ console.log(text(plaintext)); // "hello"
   travels *inside* the header ciphertext — authenticated, so downgrade games with the format
   version are not possible from the wire.
 - **Not byte-for-byte Signal's KDF.** The PQXDH secret here is
-  `HKDF(DH1‖DH2‖DH3‖DH4‖SS, salt=SHA-256("pqxdh-v1:"+contextInfo))`; Signal's spec instead
+  `HKDF(DH1‖DH2‖DH3‖DH4‖SS, salt=SHA-256("pqxdh-v2:"+contextInfo))`; Signal's spec instead
   prepends a 32-byte `0xFF` pad and uses a zero salt, and signs prekeys with XEdDSA from a single
   identity key where this library uses a separate Ed25519 signing key. Same structure and DH/KEM
   inputs, different encoding — interoperability with libsignal is a non-goal.
