@@ -11,6 +11,24 @@ This is a small, from-scratch implementation of the *style* of protocol Signal u
 `libsignal` library itself. See [Security notes](#security-notes) before you rely on it for
 anything sensitive.
 
+## 🚀 Live browser demo
+
+Try the protocol directly in your browser:
+
+**[Open the interactive demo](https://sabrigo.github.io/webcrypto-ratchet/)**
+
+The demo runs `webcrypto-ratchet` entirely client-side and lets you:
+
+- establish a PQXDH session
+- initialize the Triple Ratchet
+- send encrypted messages between Alice and Bob
+- inspect the actual encrypted wire frame
+- demonstrate decryption and ratchet progression
+
+No server-side plaintext processing is involved.
+
+> **Security:** See [SECURITY.md](./SECURITY.md) for vulnerability reporting and security policy. See [Security notes](#security-notes) for the technical security analysis, assumptions, and known limitations.
+
 ## What it does
 
 - **PQXDH** (`deriveSecretAsInitiator` / `deriveSecretAsRecipient`): a four-way X25519 handshake
@@ -120,6 +138,7 @@ import {
 // server, a QR code, whatever your app already uses for key distribution — this library doesn't
 // handle transport or storage).
 const identity = await generateDhKeyPair();
+const identityPublic = await exportRawPublic(identity.publicKey);
 const signing = await generateSigningKeyPair();
 const signedPreKey = await generateDhKeyPair();
 const signedPreKeyPublic = await exportRawPublic(signedPreKey.publicKey);
@@ -128,10 +147,12 @@ const pqPreKey = generatePqPreKeyPair();
 const pqPreKeySignature = await signBytes(signing.privateKey, pqPreKey.publicKey);
 
 // --- the initiator starts a session ---
+// (`identity` below is the initiator's own; every `their*` value comes from the recipient's
+// published bundle, i.e. the recipient's setup values above.)
 const ephemeral = await generateDhKeyPair();
 const { secret, pqCipherText } = await deriveSecretAsInitiator({
-  identityPrivateKey: myIdentity.privateKey,
-  identityPublicKeyRaw: myIdentityPublic, // bound into the KDF alongside the peer's
+  identityPrivateKey: identity.privateKey,
+  identityPublicKeyRaw: identityPublic, // bound into the KDF alongside the peer's
   ephemeralPrivateKey: ephemeral.privateKey,
   peerIdentityPublicKeyRaw: theirIdentityPublic,
   peerSignedPreKeyPublicRaw: theirSignedPreKeyPublic,
@@ -150,9 +171,11 @@ await session.initAsInitiator(secret, theirSignedPreKeyPublic, theirPqPreKeyPubl
 // which prekey ids you used) to the recipient out of band.
 
 // --- the recipient joins the session ---
+// (`identity`, `signedPreKey`, `pqPreKey` here are the recipient's own setup values; `initiator*`
+// values arrive in the handshake metadata.)
 const secret2 = await deriveSecretAsRecipient({
-  identityPrivateKey: myIdentity.privateKey,
-  identityPublicKeyRaw: myIdentityPublic,
+  identityPrivateKey: identity.privateKey,
+  identityPublicKeyRaw: identityPublic,
   signedPreKeyPrivateKey: signedPreKey.privateKey,
   peerIdentityPublicKeyRaw: initiatorIdentityPublic,
   peerEphemeralPublicKeyRaw: initiatorEphemeralPublic,
@@ -188,8 +211,9 @@ console.log(text(plaintext)); // "hello"
 - **Not an audited implementation.** This is a from-scratch reimplementation of the PQXDH/Triple
   Ratchet *design*, not the `libsignal` library, and has not had an independent cryptographic
   audit — though the one non-WebCrypto primitive it uses, ML-KEM-768, comes from `@noble/post-quantum`,
-  which is independently audited. If you need a fully audited stack, use `libsignal` (it has
-  WASM/JS bindings) instead.
+  which is independently audited. If you need a more established and independently reviewed implementation,
+  consider `libsignal` instead (native Node module only; it has no official
+  browser build — see [How it compares](#how-it-compares)).
 - **Header encryption protects metadata, not content.** Message content was already fully
   confidential via AES-256-GCM before this was added — encrypting `{dh, pqEk, pqCt, pn, n}`
   additionally hides message cadence and ratchet timing from anyone who sees the wire frames. It
