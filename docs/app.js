@@ -69,6 +69,38 @@ function setMessagingEnabled(enabled) {
   $("bob-send").disabled = !enabled;
 }
 
+function toBase64(data) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < data.length; i += chunkSize) {
+    binary += String.fromCharCode(...data.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function toHex(data, maxBytes = 256) {
+  const slice = data.subarray(0, Math.min(maxBytes, data.length));
+  let output = "";
+  for (let i = 0; i < slice.length; i += 16) {
+    const row = slice.subarray(i, i + 16);
+    const hex = Array.from(row, b => b.toString(16).padStart(2, "0")).join(" ");
+    const ascii = Array.from(row, b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : ".").join("");
+    output += i.toString(16).padStart(4, "0") + "  " + hex.padEnd(47, " ") + "  " + ascii + "\n";
+  }
+  return output.trimEnd();
+}
+
+function showCiphertext(from, frame, plaintextLength) {
+  const base64 = toBase64(frame);
+  $("cipher-summary").textContent =
+    `${from} produced a ${frame.length.toLocaleString()} byte opaque frame for a ${plaintextLength.toLocaleString()} byte plaintext.`;
+  $("cipher-base64").textContent = base64;
+  $("cipher-hex").textContent = toHex(frame);
+  $("toggle-cipher").disabled = false;
+  $("toggle-cipher").textContent = "Show raw frame";
+  $("cipher-content").hidden = true;
+}
+
 async function sendMessage(from, message) {
   const value = message.trim();
   if (!sessionReady || !value) return;
@@ -78,8 +110,10 @@ async function sendMessage(from, message) {
   const input = from === "Alice" ? $("alice-input") : $("bob-input");
 
   try {
-    const frame = await sender.encrypt(bytes(value));
+    const plaintextBytes = bytes(value);
+    const frame = await sender.encrypt(plaintextBytes);
     const decrypted = text(await receiver.decrypt(frame));
+    showCiphertext(from, frame, plaintextBytes.length);
 
     addMessage(
       from,
@@ -104,6 +138,11 @@ async function main() {
   setMessagingEnabled(false);
   logEl.textContent = "";
   messagesEl.innerHTML = '<div class="empty">Establishing the encrypted session…</div>';
+  $("cipher-summary").textContent = "Send a message to inspect its encrypted frame.";
+  $("cipher-base64").textContent = "";
+  $("cipher-hex").textContent = "";
+  $("toggle-cipher").disabled = true;
+  $("cipher-content").hidden = true;
 
   setStep(1);
   $("alice-status").textContent = "Generating identity and prekeys…";
@@ -223,6 +262,13 @@ $("alice-form").addEventListener("submit", event => {
 $("bob-form").addEventListener("submit", event => {
   event.preventDefault();
   sendMessage("Bob", $("bob-input").value);
+});
+
+$("toggle-cipher").addEventListener("click", () => {
+  const content = $("cipher-content");
+  const isHidden = content.hidden;
+  content.hidden = !isHidden;
+  $("toggle-cipher").textContent = isHidden ? "Hide raw frame" : "Show raw frame";
 });
 
 async function supportCheck() {

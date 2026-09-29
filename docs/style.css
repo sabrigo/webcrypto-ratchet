@@ -68,3 +68,17 @@ footer a { color: #889bd4; text-decoration: none; }
   .flow, .grid, .wire, .composers { grid-template-columns: 1fr; } .controls { align-items: flex-start; gap: 16px; } .composer-row { display: grid; grid-template-columns: 1fr auto; }
   .message { max-width: 92%; } footer { display: block; } footer a { display: block; margin-top: 8px; }
 }
+
+.cipher-panel { margin-top: 14px; padding: 16px; border: 1px solid #252d3b; border-radius: 12px; background: #0a0e14; }
+.cipher-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.cipher-head strong, .cipher-head span { display: block; }
+.cipher-head span { margin-top: 4px; color: #707c90; font-size: 11px; }
+button.secondary { padding: 9px 13px; background: #151b26; color: #d8dfed; border: 1px solid #30394a; }
+button.secondary:hover:not(:disabled) { background: #1b2331; }
+.cipher-content { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 14px; }
+.cipher-block { min-width: 0; }
+.cipher-block > span { display: block; margin-bottom: 7px; color: #788498; font-size: 11px; }
+.cipher-block pre { min-height: 0; max-height: 300px; overflow: auto; color: #aebbd0; word-break: break-all; white-space: pre-wrap; }
+@media (max-width: 760px) {
+  .cipher-head { align-items: flex-start; flex-direction: column; }
+}

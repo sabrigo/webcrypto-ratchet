@@ -90,6 +90,27 @@
         <div><span>Body IV</span><b>12 bytes</b></div>
         <div><span>Encrypted body</span><b id="body-size">—</b></div>
       </div>
+
+      <div class="cipher-panel">
+        <div class="cipher-head">
+          <div>
+            <strong>Actual ciphertext on the wire</strong>
+            <span id="cipher-summary">Send a message to inspect its encrypted frame.</span>
+          </div>
+          <button id="toggle-cipher" type="button" class="secondary" disabled>Show raw frame</button>
+        </div>
+        <div id="cipher-content" class="cipher-content" hidden>
+          <div class="cipher-block">
+            <span>Base64 — complete encrypted frame</span>
+            <pre id="cipher-base64"></pre>
+          </div>
+          <div class="cipher-block">
+            <span>Hex — first 256 bytes</span>
+            <pre id="cipher-hex"></pre>
+          </div>
+        </div>
+      </div>
+
       <pre id="log" aria-live="polite"></pre>
     </section>
 
