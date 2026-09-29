@@ -1,2 +1,10 @@
 node_modules/
 *.log
+graphify-out/*
+.github/copilot-instructions.md
+.github/instructions/mermaid.instructions.md
+.idea/.gitignore
+.idea/modules.xml
+.idea/vcs.xml
+.idea/webcrypto-ratchet.iml
+coverage/*

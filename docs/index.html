@@ -44,11 +44,39 @@
       </article>
     </section>
 
-    <section class="panel conversation">
+    <section class="panel live-messaging">
       <div class="section-head">
-        <div><h2>Encrypted conversation</h2><p>Messages are encrypted and decrypted locally by the two independent ratchet sessions.</p></div>
+        <div>
+          <h2>Live encrypted messaging</h2>
+          <p>Type a message as Alice or Bob. Each send creates a real encrypted ratchet frame and the other side decrypts it locally.</p>
+        </div>
         <span id="frame-size" class="pill">—</span>
       </div>
+
+      <div class="composers">
+        <form id="alice-form" class="composer alice-composer">
+          <div class="composer-head">
+            <div class="avatar alice">A</div>
+            <div><strong>Alice</strong><span>Send to Bob</span></div>
+          </div>
+          <div class="composer-row">
+            <input id="alice-input" type="text" maxlength="500" placeholder="Type a message…" autocomplete="off" disabled>
+            <button id="alice-send" type="submit" disabled>Encrypt & send</button>
+          </div>
+        </form>
+
+        <form id="bob-form" class="composer bob-composer">
+          <div class="composer-head">
+            <div class="avatar bob">B</div>
+            <div><strong>Bob</strong><span>Send to Alice</span></div>
+          </div>
+          <div class="composer-row">
+            <input id="bob-input" type="text" maxlength="500" placeholder="Type a message…" autocomplete="off" disabled>
+            <button id="bob-send" type="submit" disabled>Encrypt & send</button>
+          </div>
+        </form>
+      </div>
+
       <div id="messages" class="messages">
         <div class="empty">Run the demo to create a session.</div>
       </div>

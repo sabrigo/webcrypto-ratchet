@@ -7,10 +7,15 @@ import {
 const $ = id => document.getElementById(id);
 const run = $("run"), logEl = $("log"), messagesEl = $("messages");
 
+let aliceSession = null;
+let bobSession = null;
+let sessionReady = false;
+
 function log(message) {
   logEl.textContent += (logEl.textContent ? "\n" : "") + message;
   logEl.scrollTop = logEl.scrollHeight;
 }
+
 function setStep(n, state = "active") {
   for (let i = 1; i <= 4; i++) {
     const el = $("step-" + i);
@@ -18,25 +23,88 @@ function setStep(n, state = "active") {
     el.classList.toggle("done", i < n || (i === n && state === "done"));
   }
 }
+
 function hexPreview(value, length = 12) {
-  return Array.from(value.slice(0, length)).map(x => x.toString(16).padStart(2, "0")).join("") + "…";
+  return Array.from(value.slice(0, length))
+    .map(x => x.toString(16).padStart(2, "0"))
+    .join("") + "…";
 }
+
 function setStats(id, values) {
-  $(id).innerHTML = values.map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>").join("");
+  $(id).innerHTML = values
+    .map(([k, v]) => "<dt>" + k + "</dt><dd>" + v + "</dd>")
+    .join("");
 }
-function addMessage(who, direction, content) {
+
+function addMessage(who, direction, content, frameLength = null) {
   const empty = messagesEl.querySelector(".empty");
   if (empty) empty.remove();
+
   const div = document.createElement("div");
   div.className = "message " + (who === "Alice" ? "alice-msg" : "bob-msg");
+
   const label = document.createElement("small");
   label.textContent = who + " · " + direction;
-  div.append(label, document.createTextNode(content));
+
+  const body = document.createElement("div");
+  body.textContent = content;
+
+  if (frameLength !== null) {
+    const meta = document.createElement("em");
+    meta.textContent = `${frameLength.toLocaleString()} byte encrypted frame`;
+    div.append(label, body, meta);
+  } else {
+    div.append(label, body);
+  }
+
   messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function setMessagingEnabled(enabled) {
+  sessionReady = enabled;
+  $("alice-input").disabled = !enabled;
+  $("alice-send").disabled = !enabled;
+  $("bob-input").disabled = !enabled;
+  $("bob-send").disabled = !enabled;
+}
+
+async function sendMessage(from, message) {
+  const value = message.trim();
+  if (!sessionReady || !value) return;
+
+  const sender = from === "Alice" ? aliceSession : bobSession;
+  const receiver = from === "Alice" ? bobSession : aliceSession;
+  const input = from === "Alice" ? $("alice-input") : $("bob-input");
+
+  try {
+    const frame = await sender.encrypt(bytes(value));
+    const decrypted = text(await receiver.decrypt(frame));
+
+    addMessage(
+      from,
+      `encrypted → decrypted by ${from === "Alice" ? "Bob" : "Alice"}`,
+      decrypted,
+      frame.length
+    );
+
+    $("frame-size").textContent = `${frame.length.toLocaleString()} bytes`;
+    $("body-size").textContent = Math.max(0, frame.length - 2353).toLocaleString() + " bytes";
+
+    log(`${from} → ${from === "Alice" ? "Bob" : "Alice"}: ${frame.length.toLocaleString()} byte opaque frame.`);
+    input.value = "";
+    input.focus();
+  } catch (error) {
+    log("ERROR sending message: " + error.message);
+  }
 }
 
 async function main() {
-  run.disabled = true; logEl.textContent = ""; messagesEl.innerHTML = "";
+  run.disabled = true;
+  setMessagingEnabled(false);
+  logEl.textContent = "";
+  messagesEl.innerHTML = '<div class="empty">Establishing the encrypted session…</div>';
+
   setStep(1);
   $("alice-status").textContent = "Generating identity and prekeys…";
   $("bob-status").textContent = "Generating identity and prekeys…";
@@ -57,15 +125,31 @@ async function main() {
   const aliceEphemeral = await generateDhKeyPair();
   const aliceEphemeralPublic = await exportRawPublic(aliceEphemeral.publicKey);
 
-  setStats("alice-stats", [["Identity","X25519"],["Signing","Ed25519"],["Ratchet","X25519 + ML-KEM-768"],["Header","AES-256-GCM"],["Message KDF","HMAC-SHA256"]]);
-  setStats("bob-stats", [["Identity","X25519"],["Signing","Ed25519"],["Ratchet","X25519 + ML-KEM-768"],["Header","AES-256-GCM"],["Message KDF","HMAC-SHA256"]]);
-  $("alice-status").textContent = "Keys ready"; $("bob-status").textContent = "Prekeys published";
+  setStats("alice-stats", [
+    ["Identity", "X25519"],
+    ["Signing", "Ed25519"],
+    ["Ratchet", "X25519 + ML-KEM-768"],
+    ["Header", "AES-256-GCM"],
+    ["Message KDF", "HMAC-SHA256"]
+  ]);
+  setStats("bob-stats", [
+    ["Identity", "X25519"],
+    ["Signing", "Ed25519"],
+    ["Ratchet", "X25519 + ML-KEM-768"],
+    ["Header", "AES-256-GCM"],
+    ["Message KDF", "HMAC-SHA256"]
+  ]);
+
+  $("alice-status").textContent = "Keys ready";
+  $("bob-status").textContent = "Prekeys published";
   setStep(1, "done");
 
   setStep(2);
   log("Bob published a signed X25519 prekey + signed ML-KEM-768 prekey.");
+
   const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
-    identityPrivateKey: aliceIdentity.privateKey, identityPublicKeyRaw: aliceIdentityPublic,
+    identityPrivateKey: aliceIdentity.privateKey,
+    identityPublicKeyRaw: aliceIdentityPublic,
     ephemeralPrivateKey: aliceEphemeral.privateKey,
     peerIdentityPublicKeyRaw: bobIdentityPublic,
     peerSignedPreKeyPublicRaw: bobSignedPreKeyPublic,
@@ -75,66 +159,92 @@ async function main() {
     peerPqPreKeySignature: bobPqPreKeySignature,
     contextInfo: "browser-demo"
   });
+
   const bobSecret = await deriveSecretAsRecipient({
-    identityPrivateKey: bobIdentity.privateKey, identityPublicKeyRaw: bobIdentityPublic,
+    identityPrivateKey: bobIdentity.privateKey,
+    identityPublicKeyRaw: bobIdentityPublic,
     signedPreKeyPrivateKey: bobSignedPreKey.privateKey,
     peerIdentityPublicKeyRaw: aliceIdentityPublic,
     peerEphemeralPublicKeyRaw: aliceEphemeralPublic,
-    pqPreKeySecretKey: bobPqPreKey.secretKey, pqCipherText,
+    pqPreKeySecretKey: bobPqPreKey.secretKey,
+    pqCipherText,
     contextInfo: "browser-demo"
   });
+
   const secretsMatch = aliceSecret.length === bobSecret.length &&
     aliceSecret.every((v, i) => v === bobSecret[i]);
+
   if (!secretsMatch) throw new Error("PQXDH shared secrets did not match.");
+
   log("PQXDH complete — both sides derived the same 32-byte root secret (" + hexPreview(aliceSecret) + ").");
   setStep(2, "done");
 
   setStep(3);
-  const alice = new DoubleRatchetSession({ associatedDataPrefix: "browser-demo" });
-  const bob = new DoubleRatchetSession({ associatedDataPrefix: "browser-demo" });
-  await alice.initAsInitiator(aliceSecret, bobSignedPreKeyPublic, bobPqPreKey.publicKey);
-  await bob.initAsRecipient(bobSecret, {
+
+  aliceSession = new DoubleRatchetSession({ associatedDataPrefix: "browser-demo" });
+  bobSession = new DoubleRatchetSession({ associatedDataPrefix: "browser-demo" });
+
+  await aliceSession.initAsInitiator(
+    aliceSecret,
+    bobSignedPreKeyPublic,
+    bobPqPreKey.publicKey
+  );
+
+  await bobSession.initAsRecipient(bobSecret, {
     initialRatchetKeyPair: bobSignedPreKey,
     initialRatchetPublic: bobSignedPreKeyPublic,
     initialPqRatchetKeyPair: bobPqPreKey
   });
+
   log("Triple Ratchet initialized — X25519 DH and ML-KEM-768 ratchets are ready.");
   setStep(3, "done");
 
   setStep(4);
-  const firstFrame = await alice.encrypt(bytes("Hello Bob — this message is protected by the ratchet."));
-  addMessage("Alice", "encrypted → decrypted by Bob", text(await bob.decrypt(firstFrame)));
-  log("Alice → Bob: " + firstFrame.length.toLocaleString() + " byte opaque frame.");
+  setStep(4, "done");
 
-  const replyFrame = await bob.encrypt(bytes("Hello Alice — Bob received it and ratcheted the session."));
-  addMessage("Bob", "encrypted → decrypted by Alice", text(await alice.decrypt(replyFrame)));
-  log("Bob → Alice: " + replyFrame.length.toLocaleString() + " byte opaque frame.");
+  $("alice-status").textContent = "Session active";
+  $("bob-status").textContent = "Session active";
+  messagesEl.innerHTML = '<div class="empty">Session ready. Type a message above to send it through the ratchet.</div>';
 
-  const f2 = await alice.encrypt(bytes("Message 2 — sent before message 3."));
-  const f3 = await alice.encrypt(bytes("Message 3 — delivered first to exercise skipped-key handling."));
-  addMessage("Alice", "out of order → Bob", text(await bob.decrypt(f3)));
-  addMessage("Alice", "late delivery → Bob", text(await bob.decrypt(f2)));
+  setMessagingEnabled(true);
+  $("alice-input").focus();
 
-  $("frame-size").textContent = firstFrame.length.toLocaleString() + " bytes";
-  $("body-size").textContent = (firstFrame.length - 2353).toLocaleString() + " bytes";
-  $("alice-status").textContent = "Session active"; $("bob-status").textContent = "Session active";
-  log("Out-of-order delivery succeeded — Bob recovered the skipped message key.");
-  log("Done. All cryptographic operations ran locally in this browser.");
-  setStep(4, "done"); run.disabled = false;
+  log("Encrypted messaging is ready.");
+  log("Every message below creates a fresh opaque ciphertext frame.");
+  log("All cryptographic operations run locally in this browser.");
+  run.disabled = false;
 }
 
-function supportCheck() {
+$("alice-form").addEventListener("submit", event => {
+  event.preventDefault();
+  sendMessage("Alice", $("alice-input").value);
+});
+
+$("bob-form").addEventListener("submit", event => {
+  event.preventDefault();
+  sendMessage("Bob", $("bob-input").value);
+});
+
+async function supportCheck() {
   const ok = globalThis.isSecureContext && globalThis.crypto?.subtle;
+
   if (ok) {
-    $("support").textContent = "Secure browser context detected. Run the demo to test the required primitives.";
+    $("support").textContent =
+      "Secure browser context detected. Run the demo to establish the session.";
     run.disabled = false;
   } else {
-    $("support").textContent = "This demo needs a secure context (HTTPS or localhost) with WebCrypto.";
+    $("support").textContent =
+      "This demo needs a secure context (HTTPS or localhost) with WebCrypto.";
   }
 }
+
 run.addEventListener("click", () => main().catch(error => {
-  console.error(error); log("ERROR: " + error.message);
-  $("alice-status").textContent = "Demo failed"; $("bob-status").textContent = "Demo failed";
+  console.error(error);
+  log("ERROR: " + error.message);
+  $("alice-status").textContent = "Demo failed";
+  $("bob-status").textContent = "Demo failed";
+  setMessagingEnabled(false);
   run.disabled = false;
 }));
+
 supportCheck();

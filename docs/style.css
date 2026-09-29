@@ -33,14 +33,27 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .bob { background: #3b2c5b; color: #d2bcff; }
 dl { display: grid; grid-template-columns: 1fr auto; gap: 9px 20px; margin: 20px 0 0; padding-top: 18px; border-top: 1px solid #222936; font-size: 13px; }
 dt { color: #737f92; } dd { margin: 0; color: #dbe1eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.conversation, .inspector { padding: 22px; margin-bottom: 18px; }
+.live-messaging, .inspector { padding: 22px; margin-bottom: 18px; }
 .section-head { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
 .pill { border: 1px solid #30394a; border-radius: 999px; padding: 7px 10px; color: #aab4c6; font: 12px ui-monospace, monospace; white-space: nowrap; }
-.messages { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
-.message { max-width: 78%; padding: 12px 15px; border-radius: 14px; border: 1px solid #293140; }
+.composers { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 20px; }
+.composer { padding: 16px; border: 1px solid #293140; border-radius: 13px; background: #0c1017; }
+.composer.alice-composer { border-color: #263b67; }
+.composer.bob-composer { border-color: #40305f; }
+.composer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
+.composer-head strong, .composer-head span { display: block; }
+.composer-head span { margin-top: 3px; color: #77849a; font-size: 11px; }
+.composer-row { display: flex; gap: 8px; }
+.composer-row input { min-width: 0; flex: 1; border: 1px solid #2c3442; border-radius: 9px; padding: 11px 12px; background: #080b10; color: #e9edf5; outline: none; }
+.composer-row input:focus { border-color: #6377ae; }
+.composer-row input:disabled { opacity: .45; }
+.composer-row button { padding: 10px 13px; white-space: nowrap; }
+.messages { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+.message { max-width: 78%; padding: 12px 15px; border-radius: 14px; border: 1px solid #293140; line-height: 1.5; }
 .message.alice-msg { align-self: flex-start; background: #101827; }
 .message.bob-msg { align-self: flex-end; background: #171222; }
 .message small { display: block; margin-bottom: 4px; color: #77849a; font-size: 11px; }
+.message em { display: block; margin-top: 7px; color: #5f6b7d; font-size: 10px; font-style: normal; font-family: ui-monospace, monospace; }
 .empty { color: #687489; padding: 28px 0; text-align: center; border: 1px dashed #2b3340; border-radius: 12px; }
 .wire { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 18px 0; }
 .wire div { padding: 14px; background: #0b0f15; border-radius: 10px; }
@@ -52,6 +65,6 @@ footer { display: flex; justify-content: space-between; gap: 20px; color: #65708
 footer a { color: #889bd4; text-decoration: none; }
 @media (max-width: 760px) {
   .shell { padding-top: 30px; } .hero { display: block; } .repo { display: inline-block; margin-top: 20px; }
-  .flow, .grid, .wire { grid-template-columns: 1fr; } .controls { align-items: flex-start; gap: 16px; }
+  .flow, .grid, .wire, .composers { grid-template-columns: 1fr; } .controls { align-items: flex-start; gap: 16px; } .composer-row { display: grid; grid-template-columns: 1fr auto; }
   .message { max-width: 92%; } footer { display: block; } footer a { display: block; margin-top: 8px; }
 }

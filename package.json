@@ -12,7 +12,8 @@
     "src"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "coverage": "c8 --reporter=text --reporter=html node --test"
   },
   "keywords": [
     "double-ratchet",
