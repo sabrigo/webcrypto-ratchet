@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive browser demo for webcrypto-ratchet: PQXDH + Triple Ratchet + encrypted headers.">
+  <title>webcrypto-ratchet — Browser Demo</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">WEBCRYPTO-RATCHET</p>
+        <h1>Post-quantum messaging, in your browser.</h1>
+        <p class="lede">A real PQXDH handshake followed by a Triple Ratchet session using WebCrypto + ML-KEM-768. No server, no account, no plaintext leaves this page.</p>
+      </div>
+      <a class="repo" href="https://github.com/sabrigo/webcrypto-ratchet" target="_blank" rel="noreferrer">View source ↗</a>
+    </header>
+
+    <section class="panel controls">
+      <div>
+        <h2>Run the protocol</h2>
+        <p id="support">Checking browser crypto support…</p>
+      </div>
+      <button id="run" disabled>Run demo</button>
+    </section>
+
+    <section class="flow" aria-label="Protocol flow">
+      <article class="step" id="step-1"><span>01</span><div><strong>Identity & prekeys</strong><small>Generate X25519, Ed25519 and ML-KEM-768 material</small></div></article>
+      <article class="step" id="step-2"><span>02</span><div><strong>PQXDH</strong><small>Four X25519 inputs + ML-KEM shared secret → root secret</small></div></article>
+      <article class="step" id="step-3"><span>03</span><div><strong>Triple Ratchet</strong><small>Fresh X25519 + ML-KEM ratchet material per step</small></div></article>
+      <article class="step" id="step-4"><span>04</span><div><strong>Encrypted headers</strong><small>Ratchet keys and counters are hidden inside the frame</small></div></article>
+    </section>
+
+    <section class="grid">
+      <article class="panel party">
+        <div class="party-head"><div class="avatar alice">A</div><div><h2>Alice</h2><span id="alice-status">Not initialized</span></div></div>
+        <dl id="alice-stats"></dl>
+      </article>
+      <article class="panel party">
+        <div class="party-head"><div class="avatar bob">B</div><div><h2>Bob</h2><span id="bob-status">Not initialized</span></div></div>
+        <dl id="bob-stats"></dl>
+      </article>
+    </section>
+
+    <section class="panel conversation">
+      <div class="section-head">
+        <div><h2>Encrypted conversation</h2><p>Messages are encrypted and decrypted locally by the two independent ratchet sessions.</p></div>
+        <span id="frame-size" class="pill">—</span>
+      </div>
+      <div id="messages" class="messages">
+        <div class="empty">Run the demo to create a session.</div>
+      </div>
+    </section>
+
+    <section class="panel inspector">
+      <div class="section-head"><div><h2>Wire-frame inspector</h2><p>The frame is opaque ciphertext on the wire. The header is encrypted with AES-256-GCM.</p></div></div>
+      <div class="wire">
+        <div><span>Header IV</span><b>12 bytes</b></div>
+        <div><span>Encrypted header</span><b>2,329 bytes</b></div>
+        <div><span>Body IV</span><b>12 bytes</b></div>
+        <div><span>Encrypted body</span><b id="body-size">—</b></div>
+      </div>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+
+    <footer>
+      <span>MIT licensed · experimental cryptographic implementation · not independently audited</span>
+      <a href="https://github.com/sabrigo/webcrypto-ratchet/blob/main/README.md#security-notes" target="_blank" rel="noreferrer">Read the security notes ↗</a>
+    </footer>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
