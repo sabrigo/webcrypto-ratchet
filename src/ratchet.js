@@ -199,6 +199,16 @@ export class DoubleRatchetSession {
     // inline per entry (rather than a separate id->key table) since maxSkip already bounds the
     // total count, so there's no real table to dedupe.
     this.skippedKeys = new Map();
+    this._queue = Promise.resolve();
+  }
+
+  // encrypt() and decrypt() both read state, await, then write it back. Overlapping calls would
+  // derive two message keys from one chain key, and a failed decrypt's rollback would undo a
+  // send that ran in between -- so every call waits for the previous one to settle.
+  _serialize(operation) {
+    const result = this._queue.then(operation);
+    this._queue = result.catch(() => {});
+    return result;
   }
 
   get canSend() {
@@ -365,7 +375,11 @@ export class DoubleRatchetSession {
    * comment above): headerIv(12) || headerCiphertext(2329) || bodyIv(12) || bodyCiphertext.
    * Send it as a binary payload, or base64 the whole Uint8Array once for JSON transports.
    */
-  async encrypt(plaintextBytes) {
+  encrypt(plaintextBytes) {
+    return this._serialize(() => this._encrypt(plaintextBytes));
+  }
+
+  async _encrypt(plaintextBytes) {
     if (!this.sendChainKey) throw new Error("Ratchet session not ready to send");
     if (this.sendCounter > MAX_COUNTER) throw new Error("Send counter exhausted");
     const counter = this.sendCounter++;
@@ -400,7 +414,11 @@ export class DoubleRatchetSession {
    * logic as before runs from there, just fed the now-decrypted header instead of what used to
    * be plaintext wire fields.
    */
-  async decrypt(frame) {
+  decrypt(frame) {
+    return this._serialize(() => this._decrypt(frame));
+  }
+
+  async _decrypt(frame) {
     validateFrame(frame);
 
     let header = null;
