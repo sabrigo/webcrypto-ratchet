@@ -2,7 +2,7 @@ import {
   generateDhKeyPair, generateSigningKeyPair, generatePqPreKeyPair,
   exportRawPublic, signBytes, deriveSecretAsInitiator, deriveSecretAsRecipient,
   DoubleRatchetSession, bytes, text
-} from "https://esm.sh/webcrypto-ratchet@0.7.2?bundle";
+} from "https://esm.sh/webcrypto-ratchet@0.7.3?bundle";
 
 const $ = id => document.getElementById(id);
 const run = $("run"), logEl = $("log"), messagesEl = $("messages");
