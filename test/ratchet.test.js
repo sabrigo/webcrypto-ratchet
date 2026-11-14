@@ -514,3 +514,23 @@ test("the skipped-key cache evicts its oldest entry once it exceeds maxSkip, acr
   await assert.rejects(() => bobSession.decrypt(a0), "the evicted generation-A key is gone for good");
   assert.equal(text(await bobSession.decrypt(c0)), "c0", "the newer generation-B key survived the eviction");
 });
+
+test("overlapping encrypt()/decrypt() calls on one session are serialized, not interleaved", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const { aliceSession, bobSession } = await handshake(alice, bob);
+
+  // Un-awaited sends must each get their own chain step.
+  const frames = await Promise.all(["m0", "m1", "m2"].map((m) => aliceSession.encrypt(bytes(m))));
+  for (const [i, frame] of frames.entries()) assert.equal(text(await bobSession.decrypt(frame)), `m${i}`);
+
+  // A failing decrypt's rollback must not undo a send that overlapped it.
+  const tampered = tamperBody(await aliceSession.encrypt(bytes("x")));
+  const [, b0] = await Promise.all([
+    assert.rejects(() => bobSession.decrypt(tampered)),
+    bobSession.encrypt(bytes("b0")),
+  ]);
+  const b1 = await bobSession.encrypt(bytes("b1"));
+  assert.equal(text(await aliceSession.decrypt(b0)), "b0");
+  assert.equal(text(await aliceSession.decrypt(b1)), "b1");
+});
