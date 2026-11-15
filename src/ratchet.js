@@ -118,6 +118,8 @@ function encodeHeader(dhPublic, pqPublic, pqCipherText, pn, n) {
 // The header ciphertext is authenticated (GCM), so by the time this runs the bytes are known to
 // come from a holder of the header key -- these checks guard format drift, not attackers.
 function decodeHeader(plain) {
+  // Unreachable today: decryptHeader always slices a fixed HEADER_CIPHERTEXT_LENGTH out of the frame.
+  /* c8 ignore next */
   if (plain.length !== HEADER_PLAINTEXT_LENGTH) throw new Error("Invalid decrypted header: length");
   if (plain[0] !== HEADER_VERSION) throw new Error("Invalid decrypted header: version");
   const view = new DataView(plain.buffer, plain.byteOffset, plain.byteLength);
@@ -474,7 +476,7 @@ export class DoubleRatchetSession {
       if (cached) return await this._decryptWith(frame, cached.messageKey, header.n);
 
       if (viaNext) {
-        if (this.receiveChainKey) await this._skipReceiveKeys(header.pn);
+        await this._skipReceiveKeys(header.pn); // no-op when there's no receive chain yet
         await this._advance(header.dh, header.pqEk, header.pqCt);
       } else if (header.n < this.receiveCounter) {
         throw new Error("Message key already used or unavailable");
