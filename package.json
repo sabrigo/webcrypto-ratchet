@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "coverage": "c8 --reporter=text --reporter=html node --test"
+    "coverage": "c8 --check-coverage --lines 99 --functions 100 --branches 85 --reporter=text --reporter=html node --test"
   },
   "keywords": [
     "double-ratchet",
