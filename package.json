@@ -1,7 +1,7 @@
 {
   "name": "webcrypto-ratchet",
   "version": "0.7.3",
-  "description": "PQXDH key agreement + Triple Ratchet (Double Ratchet + continuous ML-KEM ratchet) session encryption, built on the standard WebCrypto API plus @noble/post-quantum for the ML-KEM steps WebCrypto doesn't yet support.",
+  "description": "PQXDH-style key agreement + Hybrid Double Ratchet (X25519 + ML-KEM-768 at every ratchet step) session encryption, built on the standard WebCrypto API plus @noble/post-quantum for the ML-KEM steps WebCrypto doesn't yet support.",
   "type": "module",
   "license": "MIT",
   "main": "src/index.js",
