@@ -89,6 +89,8 @@ test("verifyBytes returns false instead of throwing on a malformed signature", a
   const signing = await generateSigningKeyPair();
   const publicRaw = await exportRawPublic(signing.publicKey);
   assert.equal(await verifyBytes(publicRaw, bytes("payload"), new Uint8Array(3)), false);
+  // Not even a buffer: WebCrypto throws here rather than returning false.
+  assert.equal(await verifyBytes(publicRaw, bytes("payload"), null), false);
 });
 
 test("signing private JWK export and re-import produces a signature the original public key verifies", async () => {

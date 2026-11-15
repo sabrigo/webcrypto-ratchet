@@ -534,3 +534,104 @@ test("overlapping encrypt()/decrypt() calls on one session are serialized, not i
   assert.equal(text(await aliceSession.decrypt(b0)), "b0");
   assert.equal(text(await aliceSession.decrypt(b1)), "b1");
 });
+
+test("a one-time prekey is mixed into the PQXDH secret on both sides", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const ephemeral = await generateDhKeyPair();
+  const oneTime = await generateDhKeyPair();
+
+  const { secret: aliceSecret, pqCipherText } = await deriveSecretAsInitiator({
+    identityPrivateKey: alice.identity.privateKey,
+    identityPublicKeyRaw: alice.identityPublicRaw,
+    ephemeralPrivateKey: ephemeral.privateKey,
+    peerIdentityPublicKeyRaw: bob.identityPublicRaw,
+    peerSignedPreKeyPublicRaw: bob.signedPreKeyPublicRaw,
+    peerSignedPreKeySignature: bob.signedPreKeySignature,
+    peerSigningPublicKeyRaw: bob.signingPublicRaw,
+    peerPqPreKeyPublic: bob.pqPreKey.publicKey,
+    peerPqPreKeySignature: bob.pqPreKeySignature,
+    peerOneTimePreKeyPublicRaw: await exportRawPublic(oneTime.publicKey),
+    contextInfo: CONTEXT,
+  });
+
+  const recipientParams = {
+    identityPrivateKey: bob.identity.privateKey,
+    identityPublicKeyRaw: bob.identityPublicRaw,
+    signedPreKeyPrivateKey: bob.signedPreKey.privateKey,
+    peerIdentityPublicKeyRaw: alice.identityPublicRaw,
+    peerEphemeralPublicKeyRaw: await exportRawPublic(ephemeral.publicKey),
+    pqPreKeySecretKey: bob.pqPreKey.secretKey,
+    pqCipherText,
+    contextInfo: CONTEXT,
+  };
+  const withOneTime = await deriveSecretAsRecipient({ ...recipientParams, oneTimePreKeyPrivateKey: oneTime.privateKey });
+  const withoutOneTime = await deriveSecretAsRecipient(recipientParams);
+
+  assert.deepStrictEqual(withOneTime, aliceSecret);
+  assert.notDeepStrictEqual(withoutOneTime, aliceSecret, "dropping the one-time prekey must change the secret");
+});
+
+test("encrypt() rejects before a send chain exists and once the send counter is exhausted", async () => {
+  await assert.rejects(() => new DoubleRatchetSession().encrypt(bytes("x")), /not ready to send/);
+
+  const { aliceSession } = await handshake(await createParty(), await createParty());
+  aliceSession.sendCounter = 0xffffffff + 1;
+  await assert.rejects(() => aliceSession.encrypt(bytes("x")), /Send counter exhausted/);
+});
+
+test("encrypt() refuses to emit a header from corrupted session state", async () => {
+  const alice = await createParty();
+  const bob = await createParty();
+  const corruptions = [
+    [(s) => (s.localRatchetPublic = new Uint8Array(31)), /dh length/],
+    [(s) => (s.localPqRatchet = { publicKey: new Uint8Array(1) }), /pqEk length/],
+    [(s) => (s.pqCtToSend = new Uint8Array(1)), /pqCt length/],
+    [(s) => (s.previousSendCounter = -1), /header field: pn/],
+    [(s) => (s.sendCounter = 0.5), /header field: n/],
+  ];
+  for (const [corrupt, expected] of corruptions) {
+    const { aliceSession } = await handshake(alice, bob);
+    corrupt(aliceSession);
+    await assert.rejects(() => aliceSession.encrypt(bytes("x")), expected);
+  }
+});
+
+test("decrypt() rejects frames that are not a Uint8Array or are too short to parse", async () => {
+  const { aliceSession, bobSession } = await handshake(await createParty(), await createParty());
+  const frame = await aliceSession.encrypt(new Uint8Array(0));
+
+  await assert.rejects(() => bobSession.decrypt(uint8ToBase64(frame)), /expected Uint8Array/);
+  await assert.rejects(() => bobSession.decrypt(frame.subarray(0, frame.length - 1)), /too short/);
+  assert.deepStrictEqual(await bobSession.decrypt(frame), new Uint8Array(0)); // the session is unharmed
+});
+
+test("an undecryptable header is rejected after trying each cached header key, leaving the cache intact", async () => {
+  const { aliceSession, bobSession } = await handshake(await createParty(), await createParty());
+  await aliceSession.encrypt(bytes("m0"));
+  await aliceSession.encrypt(bytes("m1"));
+  await bobSession.decrypt(await aliceSession.encrypt(bytes("m2")));
+  assert.equal(bobSession.skippedKeys.size, 2); // two entries sharing one header key
+
+  const garbage = crypto.getRandomValues(new Uint8Array(4096));
+  await assert.rejects(() => bobSession.decrypt(garbage), /Unable to decrypt message header/);
+  assert.equal(bobSession.skippedKeys.size, 2);
+});
+
+test("a header with an unknown version byte is rejected even under the correct header key", async () => {
+  const { aliceSession, bobSession } = await handshake(await createParty(), await createParty());
+  const genuine = await aliceSession.encrypt(bytes("hi"));
+  const headerLength = genuine.length - bytes("hi").length - 12 - 16 - 12 - 16; // minus body, both IVs, both tags
+
+  const headerPlain = new Uint8Array(headerLength);
+  headerPlain[0] = 2; // only version 1 exists
+  const key = await crypto.subtle.importKey("raw", aliceSession.headerKeySend, "AES-GCM", false, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const headerCiphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, headerPlain));
+
+  const forged = genuine.slice();
+  forged.set(iv, 0);
+  forged.set(headerCiphertext, 12);
+  await assert.rejects(() => bobSession.decrypt(forged), /Unable to decrypt message header/);
+  assert.equal(text(await bobSession.decrypt(genuine)), "hi");
+});
