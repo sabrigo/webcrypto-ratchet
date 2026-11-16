@@ -1,6 +1,6 @@
 # webcrypto-ratchet
 
-PQXDH key agreement + Triple Ratchet session encryption, built on the standard
+PQXDH-style key agreement + Hybrid Double Ratchet session encryption, built on the standard
 [WebCrypto API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API) (`crypto.subtle`)
 for everything except the ML-KEM steps, which no browser or runtime exposes natively yet — those
 come from [`@noble/post-quantum`](https://github.com/paulmillr/noble-post-quantum), an audited,
@@ -20,7 +20,7 @@ Try the protocol directly in your browser:
 The demo runs `webcrypto-ratchet` entirely client-side and lets you:
 
 - establish a PQXDH session
-- initialize the Triple Ratchet
+- initialize the Hybrid Double Ratchet
 - send encrypted messages between Alice and Bob
 - inspect the actual encrypted wire frame
 - demonstrate decryption and ratchet progression
@@ -37,15 +37,18 @@ No server-side plaintext processing is involved.
   following the design of Signal's production PQXDH (the KDF encoding details differ; see
   [Security notes](#security-notes)). Both the signed prekey's and the PQ prekey's signatures
   are verified before use.
-- **Triple Ratchet** (`DoubleRatchetSession`): a fresh AES-256-GCM key for every message, derived
+- **Hybrid Double Ratchet** (`DoubleRatchetSession`): a fresh AES-256-GCM key for every message, derived
   from a symmetric chain that advances on every send/receive (HMAC-SHA256), plus a ratchet step
   whenever the peer's ratchet keys change — giving you forward secrecy message by message, not
-  just session by session. That ratchet step runs two independent public-key ratchets side by
-  side and mixes both outputs together, matching Signal's own production Triple Ratchet (Double
-  Ratchet + [SPQR](https://signal.org/blog/spqr/)): a classical X25519 DH ratchet, plus an
-  ML-KEM-768 ratchet that advances in lockstep with it. An attacker has to break *both* X25519 and
+  just session by session. Each ratchet step feeds two inputs into the root KDF: a classical
+  X25519 DH output, plus a fresh ML-KEM-768 shared secret from a KEM ratchet that advances in
+  lockstep with the DH ratchet. The intent is that an attacker has to break *both* X25519 and
   ML-KEM to recover a step's chain key — including a future quantum computer that breaks one but
-  not the other.
+  not the other. **This is not Signal's Triple Ratchet construction:**
+  Signal runs the Double Ratchet and [SPQR](https://signal.org/blog/spqr/) as two independent
+  ratchets and combines their output keys, where this library mixes the KEM secret into the
+  Double Ratchet's own root chain. See [DESIGN.md](./DESIGN.md) for the exact key schedule and a
+  list of deviations from Signal's specifications.
 - **Skipped-message-key handling**: messages that arrive out of order, or late from a chain
   that's since been superseded by one or more ratchet steps, still decrypt correctly via a
   bounded cache (`maxSkip`, default 1000) instead of failing outright. Only a message whose key
@@ -108,7 +111,7 @@ Where each is the right call:
   ~3 KB/message of ML-KEM overhead.
 
 Interoperability with any of the above is explicitly a non-goal — this library's wire format
-(JSON frames, encrypted headers carrying whole KEM payloads) and KDF encoding are its own.
+(fixed-offset binary frames, encrypted headers carrying whole KEM payloads) and KDF encoding are its own.
 
 ## Install
 
@@ -208,8 +211,8 @@ console.log(text(plaintext)); // "hello"
 
 ## Security notes
 
-- **Not an audited implementation.** This is a from-scratch reimplementation of the PQXDH/Triple
-  Ratchet *design*, not the `libsignal` library, and has not had an independent cryptographic
+- **Not an audited implementation.** This is a from-scratch implementation of a
+  PQXDH-style handshake and a hybrid ratchet inspired by Signal's designs, not the `libsignal` library, and has not had an independent cryptographic
   audit — though the one non-WebCrypto primitive it uses, ML-KEM-768, comes from `@noble/post-quantum`,
   which is independently audited. If you need a more established and independently reviewed implementation,
   consider `libsignal` instead (native Node module only; it has no official
@@ -226,12 +229,13 @@ console.log(text(plaintext)); // "hello"
   a public key really belongs to who you think it does, or persist session state across restarts.
 - **PQ resistance is continuous, not just at the handshake.** Every ratchet step (every time
   `_advance` runs, not only the initial PQXDH) mixes in a fresh ML-KEM-768 shared secret alongside
-  the X25519 DH output, matching Signal's production Triple Ratchet. Breaking X25519 alone (now,
-  or with a future quantum computer) is not enough to recover any step's chain key; ML-KEM would
-  also have to fall.
-- **No SPQR-style bandwidth chunking — every frame carries the KEM material.** Signal's SPQR
-  spreads its ML-KEM payload across multiple messages via erasure coding, purely to fit legacy
-  per-message size budgets. This library sends the ML-KEM public key (1,184 bytes) and ciphertext
+  the X25519 DH output. The design goal is that breaking X25519 alone (now, or with a future
+  quantum computer) is not enough to recover any step's chain key; ML-KEM would also have to
+  fall. This hybrid property is a design intent with no security proof, and the construction
+  differs from Signal's Triple Ratchet (see [DESIGN.md](./DESIGN.md), deviation D1).
+- **No SPQR-style chunking — every frame carries the KEM material.** Signal's SPQR spreads its
+  ML-KEM payload across multiple messages via erasure coding and advances on its own schedule,
+  independently of the DH ratchet. This library sends the ML-KEM public key (1,184 bytes) and ciphertext
   (1,088 bytes) whole, inside the encrypted header of **every message** — not just
   ratchet-carrying ones. With the fixed-offset binary framing that's 2,369 bytes of overhead per
   message on binary transports (~3.2&nbsp;KB if you base64 the frame once for JSON). The upside

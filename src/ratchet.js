@@ -1,23 +1,25 @@
-// Triple Ratchet session with encrypted headers: per-message AES-256-GCM keys derived from a
+// Hybrid Double Ratchet session with encrypted headers: per-message AES-256-GCM keys derived from a
 // chain that rotates on every send/receive, a ratchet step whenever the peer's ratchet keys
 // change, and the routing metadata itself (ratchet keys, counters) encrypted under a rotating
 // header key -- so an observer of the wire frames sees only opaque ciphertext, never message
 // cadence or ratchet timing, on top of the message content already being confidential. This
 // follows Signal's own "Double Ratchet with header encryption" extension.
 //
-// The ratchet step itself runs TWO independent public-key ratchets in parallel and mixes both
-// outputs into the root KDF, matching Signal's production "Triple Ratchet" (Double Ratchet +
-// SPQR): a classical X25519 DH ratchet, and an ML-KEM-768 KEM ratchet that advances in lockstep
-// with it. Where DH is symmetric (either side can compute the same value from their own private
+// The ratchet step itself runs TWO public-key ratchets and mixes both outputs into the root
+// KDF: a classical X25519 DH ratchet, and an ML-KEM-768 KEM ratchet that advances in lockstep
+// with it. NOTE: this is NOT Signal's "Triple Ratchet" construction --
+// Signal runs the Double Ratchet and SPQR as independent ratchets and combines their output
+// keys, where this mixes the KEM secret into the Double Ratchet's own root chain (see
+// DESIGN.md, deviation D1). Where DH is symmetric (either side can compute the same value from their own private
 // key and the peer's public key), a KEM is not -- only the keypair owner can decapsulate, so
 // each ratchet step publishes a fresh ML-KEM public key (for the peer's NEXT step to encapsulate
 // against) alongside a ciphertext (produced by encapsulating against the peer's most recently
 // published key, for THEM to decapsulate). An adversary has to break both X25519 and ML-KEM to
 // recover a step's chain key -- breaking either alone, now or with a future quantum computer,
-// isn't enough. (Signal's production SPQR additionally chunks its ~1KB KEM payload across
-// several messages via erasure coding purely to fit SMS-era bandwidth budgets -- that's a
-// transport optimization, not a security requirement, so it's not reproduced here; the KEM
-// public key and ciphertext just travel whole, inside the already-encrypted header.)
+// isn't enough -- that is the design intent; there is no security proof. (Signal's SPQR chunks
+// its KEM payload across several messages via erasure coding and advances on its own schedule;
+// none of that is reproduced here -- the KEM public key and ciphertext travel whole, inside the
+// already-encrypted header of every frame.)
 //
 // Includes a bounded skipped-message-key cache (the MAX_SKIP-capped MKSKIPPED store) so a
 // dropped or reordered message doesn't kill the session -- only decrypting a message whose key

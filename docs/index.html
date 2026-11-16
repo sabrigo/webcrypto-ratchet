@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Interactive browser demo for webcrypto-ratchet: PQXDH + Triple Ratchet + encrypted headers.">
+  <meta name="description" content="Interactive browser demo for webcrypto-ratchet: PQXDH-style handshake + Hybrid Double Ratchet + encrypted headers.">
   <title>webcrypto-ratchet — Browser Demo</title>
   <link rel="stylesheet" href="./style.css">
 </head>
@@ -13,7 +13,7 @@
       <div>
         <p class="eyebrow">WEBCRYPTO-RATCHET</p>
         <h1>Post-quantum messaging, in your browser.</h1>
-        <p class="lede">A real PQXDH handshake followed by a Triple Ratchet session using WebCrypto + ML-KEM-768. No server, no account, no plaintext leaves this page.</p>
+        <p class="lede">A real PQXDH handshake followed by a Hybrid Double Ratchet session using WebCrypto + ML-KEM-768. No server, no account, no plaintext leaves this page.</p>
       </div>
       <a class="repo" href="https://github.com/sabrigo/webcrypto-ratchet" target="_blank" rel="noreferrer">View source ↗</a>
     </header>
@@ -29,7 +29,7 @@
     <section class="flow" aria-label="Protocol flow">
       <article class="step" id="step-1"><span>01</span><div><strong>Identity & prekeys</strong><small>Generate X25519, Ed25519 and ML-KEM-768 material</small></div></article>
       <article class="step" id="step-2"><span>02</span><div><strong>PQXDH</strong><small>Four X25519 inputs + ML-KEM shared secret → root secret</small></div></article>
-      <article class="step" id="step-3"><span>03</span><div><strong>Triple Ratchet</strong><small>Fresh X25519 + ML-KEM ratchet material per step</small></div></article>
+      <article class="step" id="step-3"><span>03</span><div><strong>Hybrid Double Ratchet</strong><small>Fresh X25519 + ML-KEM ratchet material per step</small></div></article>
       <article class="step" id="step-4"><span>04</span><div><strong>Encrypted headers</strong><small>Ratchet keys and counters are hidden inside the frame</small></div></article>
     </section>
 

@@ -5,7 +5,7 @@
 `webcrypto-ratchet` is a cryptographic protocol implementation intended for
 experimentation, research, and applications that specifically require a
 pure-JavaScript/WebCrypto implementation of a PQXDH-style handshake and
-post-quantum Triple Ratchet.
+Hybrid Double Ratchet (X25519 + ML-KEM-768).
 
 **This project has not undergone an independent cryptographic security audit.**
 

@@ -1,7 +1,8 @@
 // PQXDH: X3DH generalized from the Signal design (four X25519 exchanges -- identity/signed-
 // prekey/ephemeral/one-time-prekey combinations) plus an ML-KEM-768 encapsulation against the
 // peer's signed PQ prekey, all folded through HKDF into a single 32-byte shared secret. This
-// matches Signal's own production PQXDH: the classical DH outputs alone are only as strong as
+// follows the structure of Signal's PQXDH (the KDF encoding, signature scheme and prekey types
+// differ -- see DESIGN.md): the classical DH outputs alone are only as strong as
 // X25519 against a future quantum adversary, so the KEM secret is mixed in too -- breaking
 // either the classical or the post-quantum half alone isn't enough to recover the root secret.
 // Both the signed prekey's and the PQ prekey's signatures are checked before use. Callers pass

@@ -235,7 +235,7 @@ async function main() {
     initialPqRatchetKeyPair: bobPqPreKey
   });
 
-  log("Triple Ratchet initialized — X25519 DH and ML-KEM-768 ratchets are ready.");
+  log("Hybrid Double Ratchet initialized — X25519 DH and ML-KEM-768 ratchets are ready.");
   setStep(3, "done");
 
   setStep(4);
